@@ -2821,6 +2821,8 @@
       },
     });
     const ms = Math.round(performance.now() - t0);
+    // No model on the list could read the picture, so this answer is a guess from the words.
+    const blind = ans?.imageDropped ? ' · ⚠ could not see the picture' : '';
 
     if (!ans || ans.error) {
       hud(`✗ ${ans?.error || 'no response'}`);
@@ -2835,7 +2837,7 @@
         hud(`✗ model ordered ${order.length} of ${p.sort.items.length} items`);
         return { ok: false, reason: 'sort-count', order };
       }
-      hud(`→ ${order.map(j => j + 1).join(' ')} · ${ms}ms`);
+      hud(`→ ${order.map(j => j + 1).join(' ')} · ${ms}ms${blind}`);
       console.log('[alef-solver]', ans.why, ans.raw);
 
       if (CFG.autoSubmit) hud('ordering…');
@@ -2861,7 +2863,7 @@
       const words = fills.map(j => p.drag.items[j]?.text);
       if (words.some(w => w == null)) { hud('✗ an answer was out of range'); return { ok: false, reason: 'drag-range', fills }; }
 
-      hud(`→ ${words.join(' / ')} · ${ms}ms`);
+      hud(`→ ${words.join(' / ')} · ${ms}ms${blind}`);
       console.log('[alef-solver]', ans.why, ans.raw);
 
       if (CFG.autoSubmit) hud('dragging…');
@@ -2885,7 +2887,7 @@
         return { ok: false, reason: 'match-count', pairs };
       }
 
-      hud(`→ ${pairs.map(j => j + 1).join(' ')} · ${ms}ms`);
+      hud(`→ ${pairs.map(j => j + 1).join(' ')} · ${ms}ms${blind}`);
       console.log('[alef-solver]', ans.why, ans.raw);
 
       if (CFG.autoSubmit) hud('linking…');
@@ -2914,7 +2916,7 @@
         return { ok: false, reason: 'dropdown-range', picks, menus };
       }
 
-      hud(`→ ${words.join(' / ')} · ${ms}ms`);
+      hud(`→ ${words.join(' / ')} · ${ms}ms${blind}`);
       console.log('[alef-solver]', ans.why, ans.raw);
 
       if (CFG.autoSubmit) hud('submitting…');
@@ -2935,7 +2937,7 @@
       const words = ans.words || [];
       if (!words.length) { hud('✗ no blanks returned'); return { ok: false, reason: 'cloze-empty' }; }
 
-      hud(`→ ${words.join(' / ')} · ${ms}ms`);
+      hud(`→ ${words.join(' / ')} · ${ms}ms${blind}`);
       console.log('[alef-solver]', ans.why, ans.raw, ans.mismatch || '');
 
       if (CFG.autoSubmit) hud('submitting…');
@@ -2959,7 +2961,7 @@
         return { ok: false, reason: 'range', picks };
       }
       const letters = picks.map(i => 'ABCDEFGHIJ'[i]);
-      hud(`→ ${letters.join(' + ')} · ${ms}ms${ans.confidence != null ? ` · ${(ans.confidence * 100) | 0}%` : ''}`);
+      hud(`→ ${letters.join(' + ')} · ${ms}ms${blind}${ans.confidence != null ? ` · ${(ans.confidence * 100) | 0}%` : ''}`);
       console.log('[alef-solver]', ans.why, ans.raw);
 
       if (CFG.autoSubmit) hud('ticking…');
@@ -2982,7 +2984,7 @@
       return { ok: false, reason: 'range' };
     }
 
-    hud(`→ ${'ABCDEFGHIJ'[idx]} · ${ms}ms${ans.confidence != null ? ` · ${(ans.confidence * 100) | 0}%` : ''}`);
+    hud(`→ ${'ABCDEFGHIJ'[idx]} · ${ms}ms${blind}${ans.confidence != null ? ` · ${(ans.confidence * 100) | 0}%` : ''}`);
     console.log('[alef-solver]', ans.why, ans.raw);
 
     if (CFG.autoSubmit) hud('submitting…');

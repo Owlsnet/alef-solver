@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Alef Solver",
-  "version": "0.6.21",
+  "version": "0.6.23",
   "description": "Reads the current question, asks the AI, picks the answer, submits.",
 
   "permissions": ["storage", "tabs", "activeTab", "scripting"],
   "host_permissions": [
     "https://openrouter.ai/*",
+    "https://generativelanguage.googleapis.com/*",
     "https://*.alefed.com/*"
   ],
 

@@ -156,6 +156,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   t = await settled();
   check('a script that fails while reading the page: shows the error', /failed while reading the page: boom/.test(t), JSON.stringify(t));
 
+  /* ------------------------------------------- the key warning follows the service */
+  console.log('\n=== the missing-key warning is about the service that is chosen ===');
+  const warns = async store => { await open({ store, replies: { 'do-ping': ok({ kind: null, summary: 'no question', why: WHY }) } }); await settled(); return s.eval(`document.getElementById('warn').classList.contains('on')`); };
+  check('an OpenRouter key and nothing chosen: no warning', await warns({ apiKey: 'sk-test' }) === false);
+  check('no key at all: warning', await warns({ apiKey: '' }) === true);
+  check('Gemini chosen, with a Gemini key: no warning', await warns({ provider: 'gemini', apiKey: '', geminiKey: 'AIza-test' }) === false);
+  check('Gemini chosen, with only an OpenRouter key: warning (it is not the key that will be used)', await warns({ provider: 'gemini', apiKey: 'sk-test', geminiKey: '' }) === true);
+  check('OpenRouter chosen, with only a Gemini key: warning', await warns({ provider: 'openrouter', apiKey: '', geminiKey: 'AIza-test' }) === true);
+  check('the warning does not name one service', !/OpenRouter/.test(await s.eval(`document.getElementById('warn').textContent`)));
+
   /* --------------------------------------------------- Solve this question */
   console.log('\n=== Solve this question ===');
   await open({ replies: { 'do-ping': ok({ kind: 'drag', summary: 'x' }), 'do-solve': ok({ handled: true, kind: 'drag' }) } });

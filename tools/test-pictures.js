@@ -131,6 +131,29 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('it chose the card without pressing the magnifier', await s.eval(`window.__selection`) === 3 && await s.eval(`window.__zoomClicks`) === 0, JSON.stringify(outZc.trail) + ' zoomClicks=' + await s.eval(`window.__zoomClicks`));
   check('and Submit went in and was taken', outZc.submitted === true && await s.eval(`window.__graded`) === true, outZc.error || '');
 
+  // When no model on the list could read the picture, the answer is a guess from the words, and the
+  // page's status line must say so — otherwise a wrong graph answer looks like a model that cannot
+  // read graphs, and nothing says which model to change.
+  console.log('\n=== an answer given without the picture says so ===');
+  const askWith = async reply => {
+    await load('');
+    await s.eval(`
+      window.__huds = [];
+      // The status line is rewritten twice in the same instant ("→ B …" then "submitting…"), so read
+      // each text as it is added, not the element afterwards.
+      new MutationObserver(recs => { for (const r of recs) for (const n of r.addedNodes) if (n.nodeType === 3 && /^alef · /.test(n.textContent)) window.__huds.push(n.textContent); })
+        .observe(document.documentElement, { subtree: true, childList: true });
+      window.chrome.runtime.sendMessage = m => Promise.resolve(m && m.type === 'ask' ? ${JSON.stringify(reply)} : { error: 'no capture in tests' });
+      'ok'`, { awaitPromise: false });
+    const r = await J(`window.__alefSolver.solveOne(true)`);
+    return { r, huds: await J(`window.__huds`) };
+  };
+  let b = await askWith({ index: 1, letter: 'B', confidence: 0.4, why: 'blind', imageDropped: true });
+  check('the question was answered and submitted', b.r.ok === true && b.r.commit.submitted === true, JSON.stringify(b.r.reason || ''));
+  check('and the status line said the picture was not seen, beside the answer', b.huds.some(t => /→ B · \d+ms · ⚠ could not see the picture/.test(t)), JSON.stringify(b.huds.filter(t => /→/.test(t))));
+  b = await askWith({ index: 1, letter: 'B', confidence: 0.9, why: 'sees' });
+  check('an answer from a model that did see it carries no such note', b.r.ok === true && b.huds.some(t => /→ B/.test(t)) && !b.huds.some(t => /could not see/.test(t)), JSON.stringify(b.huds.filter(t => /→/.test(t))));
+
   s.close();
   console.log(`\n${fail === 0 ? '✓ all' : '✗'} ${pass} passed, ${fail} failed\n`);
   cleanup();

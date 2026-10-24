@@ -5,10 +5,15 @@
  */
 
 const API = 'https://openrouter.ai/api/v1/chat/completions';
+const GEMINI_API = 'https://generativelanguage.googleapis.com/v1beta';
 const DEFAULTS = {
+  provider: 'openrouter',          // 'openrouter' | 'gemini': which service answers
   apiKey: '',
   model: 'deepseek/deepseek-v4.1-flash',
   fallbackModel: '',
+  geminiKey: '',                   // a key from Google AI Studio; used only when provider is 'gemini'
+  geminiModel: 'gemini-2.5-flash',
+  geminiFallbackModel: '',
   autoSubmit: true,
   openPassage: true,
   screenshot: 'auto', // 'auto' | 'always' | 'never'
@@ -271,6 +276,63 @@ function buildBody(cfg, p) {
   };
 }
 
+/* ---------------------------------------------------------------- Gemini */
+
+// The prompts are built once, in the chat shape every provider takes (a system message and a
+// user message of text and picture parts). Gemini's own API wants the same content laid out
+// differently, so it is converted here, at the last moment, and nowhere else.
+
+/** The address for one model. `models/gemini-2.5-flash` and `gemini-2.5-flash` are the same
+ *  model: the list Google returns uses the first spelling. The key is NOT in the address — it
+ *  goes in a header, so it cannot end up in a log or an error message. */
+function geminiUrl(model) {
+  return `${GEMINI_API}/models/${encodeURIComponent(String(model).trim().replace(/^models\//, ''))}:generateContent`;
+}
+
+/** A chat-shaped request as a Gemini `generateContent` body. Pictures must arrive as data
+ *  (a screenshot): Gemini cannot fetch a link on the page's behalf either. */
+function toGemini(body, structured) {
+  const [system, user] = body.messages;
+  const parts = [];
+  for (const c of user.content) {
+    if (c.type === 'text') { parts.push({ text: c.text }); continue; }
+    const m = /^data:([^;,]+);base64,(.*)$/s.exec(c.image_url?.url || '');
+    if (m) parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
+  }
+  return {
+    systemInstruction: { parts: [{ text: system.content }] },
+    contents: [{ role: 'user', parts }],
+    generationConfig: {
+      temperature: body.temperature,
+      maxOutputTokens: body.max_tokens,
+      ...(structured ? { responseMimeType: 'application/json' } : {}),
+    },
+  };
+}
+
+// How a service says the model it was asked for cannot take a picture. Not matched: a failure to
+// FETCH a picture ("Received 401 status code when fetching image from URL"), which says nothing
+// about the model.
+const NO_VISION = /(?:support|supports|supported|enabled)[^.]{0,40}image (?:input|modality)|image (?:input|modality)[^.]{0,40}(?:not|n't) (?:supported|enabled|available)|(?:not|n't) support[^.]{0,25}(?:image|vision)|no endpoints found that support image/i;
+
+// Why Gemini may return no text at all: it refused. Asking again with more room will not help.
+const GEMINI_BLOCKS = /^(SAFETY|PROHIBITED_CONTENT|BLOCKLIST|SPII|IMAGE_SAFETY|RECITATION|LANGUAGE|OTHER)$/;
+
+/** Gemini's reply as the three things the caller reads: the text, why it stopped (MAX_TOKENS is
+ *  said as "length", as the others say it), and — when it declined — the reason. */
+function fromGemini(json) {
+  const cand = json?.candidates?.[0];
+  const raw = (cand?.content?.parts || []).filter(p => typeof p?.text === 'string' && !p.thought).map(p => p.text).join('');
+  const reason = cand?.finishReason || '';
+  const refused = json?.promptFeedback?.blockReason || (!raw.trim() && GEMINI_BLOCKS.test(reason) ? reason : '');
+  return {
+    raw,
+    finish: reason === 'MAX_TOKENS' ? 'length' : reason,
+    blocked: refused,
+    tokens: json?.usageMetadata?.candidatesTokenCount,
+  };
+}
+
 // Room for a reasoning model to think. Its thinking counts against this limit,
 // so the old 300–400 was enough for an easy question and, on a hard one, was
 // used up before a single character of the answer — an empty reply, and a
@@ -455,15 +517,28 @@ function parseAnswer(raw) {
 
 async function ask(payload) {
   const cfg = await settings();
-  if (!cfg.apiKey) return { error: 'No API key set — open the extension Options and paste one.' };
+  const gemini = cfg.provider === 'gemini';
+  if (gemini ? !cfg.geminiKey : !cfg.apiKey) {
+    return { error: gemini ? 'No Gemini API key set — open the extension Options and paste one.'
+                           : 'No API key set — open the extension Options and paste one.' };
+  }
 
-  const chain = [cfg.model, cfg.fallbackModel].filter(Boolean);
+  // A model box saved empty means "the default", not "no model to ask".
+  const chain = (gemini ? [cfg.geminiModel || DEFAULTS.geminiModel, cfg.geminiFallbackModel] : [cfg.model, cfg.fallbackModel]).filter(Boolean);
   let body = buildBody(cfg, payload);
   let imageDropped = false;
   const errors = [];
   const hasImages = b => b.messages[1].content.some(c => c.type === 'image_url');
+  const blind = new Set();       // models that said they cannot read a picture
 
   const post = (model, structured) => {
+    if (gemini) {
+      return fetch(geminiUrl(model), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cfg.geminiKey },
+        body: JSON.stringify(toGemini(body, structured)),
+      });
+    }
     const reqBody = { ...body, model };
     if (structured) reqBody.response_format = { type: 'json_object' };
     return fetch(API, {
@@ -483,7 +558,8 @@ async function ask(payload) {
   /** One round trip. Resolves { parsed } on success, or { error, then } where
    *  `then` says what the caller should do next: 'network' (give up on this
    *  model), 'format' (retry without response_format), 'model' (try the next
-   *  model) or 'again' (try the next way of asking this one). */
+   *  model), 'again' (try the next way of asking this one) or 'stop' (give up
+   *  altogether: the key is refused, and every model would be). */
   const attempt = async (model, structured) => {
     let res;
     try {
@@ -494,6 +570,22 @@ async function ask(payload) {
 
     if (!res.ok) {
       const detail = (await res.text().catch(() => '')).slice(0, 300);
+
+      // Google says a wrong key as a plain 400, and a key that may not use this model as a 403:
+      // another model or another way of asking will be refused the same way, so stop here and
+      // say what to check.
+      if (gemini && (res.status === 401 || res.status === 403 || /API_KEY_INVALID|API key not valid/i.test(detail))) {
+        return { error: `${model}: Gemini refused the request (HTTP ${res.status}) — check the key in Options. ${detail.slice(0, 160)}`, then: 'stop' };
+      }
+
+      // A model that cannot read pictures at all says so — OpenRouter as a 404 ("No endpoints found
+      // that support image input"), others as a 400. That is a fact about the model, not about this
+      // picture: the next model may well read it, so it is tried next, picture and all. Only when
+      // none can does the question go out without it (below).
+      if (hasImages(body) && NO_VISION.test(detail)) {
+        blind.add(model);
+        return { error: `${model}: cannot read pictures (HTTP ${res.status})`, then: 'model' };
+      }
 
       // A picture the provider can't fetch or read — a 401 on an image URL, an
       // unsupported format — must not cost the answer. Send the same request
@@ -511,9 +603,15 @@ async function ask(payload) {
     }
 
     const json = await res.json().catch(() => null);
-    const choice = json?.choices?.[0];
-    const raw = choice?.message?.content ?? '';
-    const finish = choice?.finish_reason || choice?.native_finish_reason || '';
+    let raw, finish, tokens, blocked = '';
+    if (gemini) {
+      ({ raw, finish, tokens, blocked } = fromGemini(json));
+    } else {
+      const choice = json?.choices?.[0];
+      raw = choice?.message?.content ?? '';
+      finish = choice?.finish_reason || choice?.native_finish_reason || '';
+      tokens = json?.usage?.completion_tokens;
+    }
 
     const parsed = payload.kind === 'cloze' ? parseCloze(raw, payload.cloze?.blanks?.length)
       : payload.kind === 'dropdown' ? parsePicks(raw, payload.dropdown?.menus)
@@ -530,7 +628,7 @@ async function ask(payload) {
     // An empty answer from a model that reasons usually means it spent the whole
     // token budget thinking and was cut off (finish_reason "length"). Give it
     // room and ask once more, rather than failing a question it could answer.
-    if (!tokensRaised && (finish === 'length' || !String(raw).trim())) {
+    if (!tokensRaised && !blocked && (finish === 'length' || !String(raw).trim())) {
       tokensRaised = true;
       body = { ...body, max_tokens: RETRY_TOKENS };
       errors.push(`${model}: empty reply (finish_reason=${finish || 'none'}) — retried with ${RETRY_TOKENS} tokens`);
@@ -539,23 +637,42 @@ async function ask(payload) {
 
     return {
       error: `${model}: unparseable reply ${JSON.stringify(String(raw).slice(0, 120))} ` +
-             `(finish_reason=${finish || 'none'}, completion_tokens=${json?.usage?.completion_tokens ?? '?'}, ` +
+             `(finish_reason=${finish || 'none'}${blocked ? `, refused=${blocked}` : ''}, completion_tokens=${tokens ?? '?'}, ` +
              `max_tokens=${body.max_tokens})`,
-      then: 'again',
+      then: blocked ? 'model' : 'again',     // a refusal is the same however it is asked
     };
   };
 
-  for (const model of chain) {
-    // Try structured output first, then plain — some models reject response_format.
-    for (const structured of [true, false]) {
-      const r = await attempt(model, structured);
-      if (r.parsed) return r.parsed;
-      errors.push(r.error);
-      if (r.then === 'network' || r.then === 'model') break;   // next model
-      // 'format' and 'again': the next way of asking this model
+  /** Every model in turn. Resolves the parsed answer, 'stop' (the key is refused: no model will do
+   *  better), or null when none of them answered. */
+  const runChain = async () => {
+    for (const model of chain) {
+      // Try structured output first, then plain — some models reject response_format.
+      for (const structured of [true, false]) {
+        const r = await attempt(model, structured);
+        if (r.parsed) return r.parsed;
+        errors.push(r.error);
+        if (r.then === 'stop') return 'stop';
+        if (r.then === 'network' || r.then === 'model') break;   // next model
+        // 'format' and 'again': the next way of asking this model
+      }
     }
+    return null;
+  };
+
+  let got = await runChain();
+
+  // Not one model on the list could read the picture. A guess from the words is better than a
+  // stopped lesson, so ask once more without it — and say so in the answer (imageDropped), so
+  // the person can pick a model that sees pictures.
+  if (!got && blind.size && hasImages(body)) {
+    errors.push('no model on the list can read pictures — asking again without the picture');
+    body = buildBody(cfg, { ...payload, image: null, images: [] });
+    imageDropped = true;
+    got = await runChain();
   }
 
+  if (got && got !== 'stop') return got;
   return { error: errors.join(' | ') || 'unknown failure' };
 }
 

@@ -1,4 +1,7 @@
-const FIELDS = ['apiKey', 'model', 'fallbackModel', 'answerDelay', 'stepDelay', 'retries', 'devMode', 'hotkeys', 'maxLessons'];
+const FIELDS = ['provider', 'apiKey', 'model', 'fallbackModel', 'geminiKey', 'geminiModel', 'geminiFallbackModel',
+                'answerDelay', 'stepDelay', 'retries', 'devMode', 'hotkeys', 'maxLessons'];
+const GEMINI_API = 'https://generativelanguage.googleapis.com/v1beta';
+const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
 
 /* ------------------------------------------------------------- shortcuts */
 
@@ -115,15 +118,28 @@ async function load() {
   // name keeps its default, and one saved as null stays unset.
   hotkeys = { ...clone(DEFAULT_HOTKEYS), ...(s.hotkeys || {}) };
   renderKeys();
+  document.getElementById('provider').value = s.provider === 'gemini' ? 'gemini' : 'openrouter';
   document.getElementById('apiKey').value = s.apiKey || '';
   document.getElementById('model').value = s.model || 'deepseek/deepseek-v4.1-flash';
   document.getElementById('fallbackModel').value = s.fallbackModel || '';
+  document.getElementById('geminiKey').value = s.geminiKey || '';
+  document.getElementById('geminiModel').value = s.geminiModel || DEFAULT_GEMINI_MODEL;
+  document.getElementById('geminiFallbackModel').value = s.geminiFallbackModel || '';
+  showProvider();
   document.getElementById('answerDelay').value = s.answerDelay ?? 120;
   document.getElementById('stepDelay').value = s.stepDelay ?? 250;
   document.getElementById('retries').value = s.retries ?? 3;
   document.getElementById('maxLessons').value = s.maxLessons ?? 5;
   document.getElementById('devMode').checked = s.devMode === true;
 }
+
+/** Show the fields of the service that is chosen, and only those. */
+function showProvider() {
+  const gemini = document.getElementById('provider').value === 'gemini';
+  document.getElementById('openrouterFields').hidden = gemini;
+  document.getElementById('geminiFields').hidden = !gemini;
+}
+document.getElementById('provider').addEventListener('change', () => { showProvider(); status('Press Save to switch.'); });
 
 function status(msg, cls) {
   const el = document.getElementById('status');
@@ -137,9 +153,13 @@ function read() {
     return Math.max(0, Math.min(max, parseInt(el.value, 10) || 0));
   };
   return {
+    provider: document.getElementById('provider').value === 'gemini' ? 'gemini' : 'openrouter',
     apiKey: document.getElementById('apiKey').value.trim(),
     model: document.getElementById('model').value.trim() || 'deepseek/deepseek-v4.1-flash',
     fallbackModel: document.getElementById('fallbackModel').value.trim(),
+    geminiKey: document.getElementById('geminiKey').value.trim(),
+    geminiModel: document.getElementById('geminiModel').value.trim() || DEFAULT_GEMINI_MODEL,
+    geminiFallbackModel: document.getElementById('geminiFallbackModel').value.trim(),
     answerDelay: num('answerDelay', 3000),
     stepDelay: num('stepDelay', 5000),
     retries: num('retries', 10),
@@ -154,7 +174,60 @@ document.getElementById('save').addEventListener('click', async () => {
   status('Saved.', 'ok');
 });
 
+/** Ask Google which models this key may use, and offer exactly those. Best effort: the test
+ *  already passed, and the suggestions in the page stay if this cannot be read. Returns how
+ *  many were found. */
+async function listGeminiModels(key) {
+  try {
+    const res = await fetch(`${GEMINI_API}/models?pageSize=200`, { headers: { 'x-goog-api-key': key } });
+    if (!res.ok) return 0;
+    const j = await res.json();
+    const names = (j.models || [])
+      .filter(m => /gemini/i.test(m.name || '') && (m.supportedGenerationMethods || []).includes('generateContent'))
+      .map(m => ({ id: String(m.name).replace(/^models\//, ''), label: m.displayName || '' }));
+    if (!names.length) return 0;
+    const list = document.getElementById('geminiModels');
+    list.textContent = '';
+    for (const { id, label } of names) {
+      const o = document.createElement('option');
+      o.value = id;
+      o.textContent = label ? `${id} — ${label}` : id;
+      list.append(o);
+    }
+    return names.length;
+  } catch { return 0; }
+}
+
+async function testGemini() {
+  const { geminiKey, geminiModel } = read();
+  if (!geminiKey) { status('Paste a Gemini key first.', 'bad'); return; }
+  status('Testing…');
+  try {
+    const model = geminiModel.replace(/^models\//, '');
+    const res = await fetch(`${GEMINI_API}/models/${encodeURIComponent(model)}:generateContent`, {
+      method: 'POST',
+      headers: { 'x-goog-api-key': geminiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: 'Reply with the single word: ok' }] }],
+        generationConfig: { maxOutputTokens: 256 },       // room for a model that thinks first
+      }),
+    });
+    if (!res.ok) {
+      const d = (await res.text()).slice(0, 200);
+      status(`HTTP ${res.status} — ${d}`, 'bad');
+      return;
+    }
+    const j = await res.json();
+    const reply = (j?.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('').trim() || '(empty)';
+    const n = await listGeminiModels(geminiKey);
+    status(`✓ ${model} responded: "${reply}"${n ? ` · ${n} models available to this key are in the list` : ''}`, 'ok');
+  } catch (e) {
+    status(`✗ ${e.message || e}`, 'bad');
+  }
+}
+
 document.getElementById('test').addEventListener('click', async () => {
+  if (document.getElementById('provider').value === 'gemini') { await testGemini(); return; }
   const { apiKey, model } = read();
   if (!apiKey) { status('Paste a key first.', 'bad'); return; }
   status('Testing…');

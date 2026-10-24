@@ -27,9 +27,14 @@ These types were built and tested against mock pages modelled on the real layout
 
 1. Open `chrome://extensions` and turn on Developer mode.
 2. Click Load unpacked and select this folder.
-3. Open the extension's Options, paste an [OpenRouter](https://openrouter.ai/keys) API key, click Test key, then Save.
+3. Open the extension's Options, choose which service answers the questions, paste its key, click Test key, then Save.
 
-The key is stored in your browser only and is sent to nothing but openrouter.ai. The default model is `deepseek/deepseek-v4.1-flash`.
+Two services are supported, and only the one chosen in Options is used:
+
+- **OpenRouter** (the default): one key from [openrouter.ai/keys](https://openrouter.ai/keys), many models. The default model is `deepseek/deepseek-v4.1-flash`.
+- **Google Gemini**: your own key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey), called directly. The default model is `gemini-2.5-flash`. After Test key works, the model box offers exactly the Gemini models that key can use. Check Google's own pages for what a model costs and what the limits are.
+
+Each service keeps its own key, model and fallback model, so switching back and forth loses nothing. A key is stored in your browser only and is sent to nothing but its own service: openrouter.ai for the first, generativelanguage.googleapis.com for the second, where it travels in a request header and never in the address. If Google refuses the key, the run stops at once and says so, since no other model would be allowed either.
 
 ## Use
 
@@ -54,7 +59,7 @@ There is no build step. The tests drive headless Chrome and need Node 24 and Chr
 
     node tools/test-drag.js
 
-There is one `tools/test-*.js` file per area (parsers, lessons, each question type, retries, shortcuts, the popup).
+There is one `tools/test-*.js` file per area (parsers, lessons, each question type, retries, shortcuts, the popup, the Options page, and the two answering services: `tools/test-gemini.js` runs the real service worker against a scripted network and needs no browser, no key and no call to Google).
 
 ---
 
