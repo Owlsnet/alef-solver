@@ -60,13 +60,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await s.send('Runtime.enable');
   s.on('Inspector.targetCrashed', () => { console.error('\n✗ the page (renderer) crashed'); process.exit(1); });
 
-  // The model is stubbed: it records what it was asked and answers with window.__answer.
-  async function load(query = '', answer = { indices: [1, 4], confidence: 0.9, why: 'both forms of the set', raw: '' }) {
+  // The model is stubbed: it records what it was asked and answers with window.__answer — or, when a
+  // queue of replies is given, with the next one of those, one per question asked.
+  async function load(query = '', answer = { indices: [1, 4], confidence: 0.9, why: 'both forms of the set', raw: '' }, queue = []) {
     await s.goto(PAGE + query);
     await s.eval(`
-      window.__asked = []; window.__stored = {}; window.__answer = ${JSON.stringify(answer)};
+      window.__asked = []; window.__stored = {}; window.__answer = ${JSON.stringify(answer)}; window.__queue = ${JSON.stringify(queue)};
       window.chrome = { runtime: { sendMessage: m => {
-          if (m && m.type === 'ask') { window.__asked.push(m.payload); return Promise.resolve(window.__answer); }
+          if (m && m.type === 'ask') { window.__asked.push(m.payload); return Promise.resolve(window.__queue.length ? window.__queue.shift() : window.__answer); }
           return Promise.resolve({ error: 'no capture in tests' }); }, onMessage: { addListener(){} } },
         storage: { local: { get: (k, cb) => cb ? cb({}) : Promise.resolve({}), set: o => { Object.assign(window.__stored, o); return Promise.resolve(); } }, onChanged: { addListener(){} } } };
       'ok'`, { awaitPromise: false });
@@ -154,6 +155,76 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(150);
   const report = await ev(`window.__stored.lastReport || ''`);
   check('the report says it is a tick-all question, its instruction, and what is ticked now', /multi-select\s+yes — instruction "Select the correct answers\.", ticked now: C/.test(report), (report.match(/multi-select.*/) || [''])[0]);
+
+  // The live page took two ticks on a question with two right answers and quietly ignored a third. It
+  // never says how many it takes, so the model answered with three and the run stopped.
+  console.log('\n=== a page that takes only as many ticks as there are right answers ===');
+  await load('?max=2');
+  const outMax = await J(`window.__alefSolver.commitMulti([0, 1, 4], { autoSubmit: false, answerDelay: 60 })`);
+  const refusedMax = await ev(`window.__refused`);
+  check('(fixture) the page took A and B and ignored every press on E', refusedMax.length > 0 && refusedMax.every(x => x === 4), JSON.stringify(refusedMax));
+  check('it is not a success, and it works out the page takes 2', outMax.selected === false && outMax.limit === 2, JSON.stringify({ selected: outMax.selected, limit: outMax.limit, ticked: outMax.ticked }));
+  check('and the message says so', /only 2 ticks/.test(outMax.error || ''), outMax.error);
+
+  await load('?max=2', undefined, [{ indices: [0, 1, 4], confidence: 0.95 }, { indices: [1, 4], confidence: 0.9 }]);
+  const rMax = await J(`window.__alefSolver.solveOne(true)`);
+  const askedMax = await J(`window.__asked`);
+  check('the model is asked again, and told the page takes 2', askedMax.length === 2 && askedMax[0].maxPicks === undefined && askedMax[1].maxPicks === 2, JSON.stringify(askedMax.map(a => a.maxPicks)));
+  check('the new answer is put in: the extra tick is switched off, the other one on', JSON.stringify(await ev(`window.__submitted`)) === '[1,4]', JSON.stringify(await ev(`window.__submitted`)));
+  check('Submit was pressed once, and the page took it as right', rMax.ok === true && rMax.commit.submitted === true && await ev(`window.__submitPresses`) === 1 && await ev(`window.__correct`) === true, rMax.reason || '');
+
+  await load('?max=2', undefined, [{ indices: [0, 1, 4] }, { indices: [0, 1, 4] }]);
+  const rStill = await J(`window.__alefSolver.solveOne(true)`);
+  check('a model that still gives three is asked only once more, then it stops and says why', (await J(`window.__asked.length`)) === 2 && rStill.ok === false && /only 2 ticks/.test(rStill.reason || '') && await ev(`window.__submitPresses`) === 0, JSON.stringify(rStill.reason));
+
+  await load('?max=2&pre=3,5');
+  const outPre2 = await J(`window.__alefSolver.commitMulti([1, 4], { autoSubmit: false, answerDelay: 60 })`);
+  check('wrong ticks are switched off before right ones go on, so a page at its limit has room', outPre2.selected === true && (await ev(`window.__refused`)).length === 0 && outPre2.ticked === 'BE', JSON.stringify({ sel: outPre2.selected, refused: await ev(`window.__refused`), ticked: outPre2.ticked }));
+
+  // The other way round: on another question the live page kept Submit greyed out until two were ticked,
+  // and the model gave one. Nothing was wrong with the tick — the page was waiting for more.
+  console.log('\n=== a page that keeps Submit off until enough are ticked ===');
+  await load('?need=2');
+  const outNeed = await J(`window.__alefSolver.commitMulti([1], { autoSubmit: true, answerDelay: 60 })`);
+  check('one tick goes in, but Submit never enables, and the page was not asked to submit', outNeed.selected === true && outNeed.submitted === false && await ev(`window.__submitPresses`) === 0, JSON.stringify({ sel: outNeed.selected, sub: outNeed.submitted }));
+  check('it works out the page wants at least 2, and says so', outNeed.needMore === 2 && /may want more/.test(outNeed.error || ''), JSON.stringify({ needMore: outNeed.needMore, error: outNeed.error }));
+
+  await load('?need=2', undefined, [{ indices: [1], confidence: 0.9 }, { indices: [1, 4], confidence: 0.9 }]);
+  const rNeed = await J(`window.__alefSolver.solveOne(true)`);
+  const askedNeed = await J(`window.__asked`);
+  check('the model is asked again, and told the page wants at least 2', askedNeed.length === 2 && askedNeed[0].minPicks === undefined && askedNeed[1].minPicks === 2, JSON.stringify(askedNeed.map(a => a.minPicks)));
+  check('the second tick goes in beside the first, Submit enables and is pressed once, and the page takes it as right', rNeed.ok === true && rNeed.commit.submitted === true && JSON.stringify(await ev(`window.__submitted`)) === '[1,4]' && await ev(`window.__submitPresses`) === 1 && await ev(`window.__correct`) === true, rNeed.reason || '');
+
+  await load('?need=2', undefined, [{ indices: [1] }, { indices: [1] }, { indices: [1] }]);
+  const rStuck = await J(`window.__alefSolver.solveOne(true)`);
+  check('a model that keeps giving one is asked only once more, then it stops with the reason', (await J(`window.__asked.length`)) === 2 && rStuck.commit.submitted === false && /Submit stays off with 1 ticked/.test(rStuck.reason || '') && await ev(`window.__submitPresses`) === 0, JSON.stringify(rStuck.reason));
+
+  await load('?need=3&max=3', undefined, [{ indices: [1] }, { indices: [1, 4] }, { indices: [1, 4, 5] }]);
+  const rTwice = await J(`window.__alefSolver.solveOne(true)`);
+  const askedTwice = await J(`window.__asked`);
+  check('a page that wants three needs two more questions, and no more than that', askedTwice.length === 3 && askedTwice[1].minPicks === 2 && askedTwice[2].minPicks === 3 && JSON.stringify(await ev(`window.__submitted`)) === '[1,4,5]', JSON.stringify(askedTwice.map(a => a.minPicks)));
+
+  await load('?need=9', undefined, [{ indices: [1] }, { indices: [1, 4] }, { indices: [1, 4, 5] }, { indices: [1, 4, 5, 6] }, { indices: [1, 4, 5, 6, 7] }]);
+  const rNever = await J(`window.__alefSolver.solveOne(true)`);
+  check('a page whose Submit never enables costs two more questions at most, however many ticks it is given', (await J(`window.__asked.length`)) === 3 && rNever.commit.submitted === false && await ev(`window.__submitPresses`) === 0, `asked=${await J(`window.__asked.length`)}`);
+
+  await load('?need=2');
+  const outAll = await J(`window.__alefSolver.commitMulti([1, 4], { autoSubmit: true, answerDelay: 60 })`);
+  check('an ordinary page (or a right count) is not asked again: Submit goes in as before', outAll.submitted === true && outAll.needMore === undefined);
+
+  // A question the live run met whose page text held no question at all, only "Select the correct answers.".
+  // The model was left to guess and thought itself out of room; the report showed nothing to tell why.
+  console.log('\n=== a question whose own text is missing from the page ===');
+  await load('');
+  const repFull = await J(`window.__alefSolver.report()`);
+  check('an ordinary question: no page outline in the report (it is not needed)', !repFull.skeleton, `len=${(repFull.skeleton || '').length}`);
+  await load('?nostem=1', undefined, [{ indices: [1, 4] }]);
+  const repNoText = await J(`window.__alefSolver.report()`);
+  check('(fixture) the only "question" found is the instruction line', repNoText.kind === 'choice' && repNoText.multi === true && repNoText.stem === repNoText.instruction, JSON.stringify({ stem: repNoText.stem, instruction: repNoText.instruction }));
+  check('the report then carries the page outline, which is what shows where the question went', typeof repNoText.skeleton === 'string' && repNoText.skeleton.length > 200 && /lib-options-list-container/.test(repNoText.skeleton), `len=${(repNoText.skeleton || '').length}`);
+  const rNoText = await J(`window.__alefSolver.solveOne(true)`);
+  const askedNoText = await J(`window.__asked`);
+  check('and it is still answered: the model is sent the (empty) question as the instruction line, and the picture if there is one', rNoText.ok === true && askedNoText.length === 1 && askedNoText[0].stem === askedNoText[0].instruction && rNoText.commit.submitted === true, rNoText.reason || '');
 
   console.log('\n=== single choice is unchanged ===');
   await load('?radio=1');

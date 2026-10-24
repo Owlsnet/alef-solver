@@ -14,7 +14,8 @@ const { spawn } = require('child_process');
 const { Session, findPage, version } = require('./cdp.js');
 
 const ROOT = path.join(__dirname, '..');
-const CONTENT_JS = fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8');
+// ALEF_CONTENT points at a deliberately broken copy, to prove a check can fail.
+const CONTENT_JS = fs.readFileSync(process.env.ALEF_CONTENT || path.join(ROOT, 'content.js'), 'utf8');
 const FIXTURE = path.join(__dirname, 'fixture-lesson.html');
 const PORT = 9334;
 process.env.CDP_PORT = String(PORT);
@@ -189,6 +190,62 @@ const chromeExe = [
 
   const rep2 = JSON.parse(await s.eval(`JSON.stringify(window.__alefSolver.report())`));
   check('page reloaded back to question 1', rep2.options.length === 4);
+
+  /* --- a lesson that moves on by itself: no Next button after Submit ------- */
+  // The live case: the run answered question 1, found no Next button, and stopped with "nothing more to do
+  // here" — over a fresh, unanswered question the page had put up by itself.
+  console.log('\na lesson that moves on after Submit by itself');
+  await s.goto(url + '&auto=1');
+  await s.eval(`
+    window.__asked = []; window.__scripted = [1,2,0];
+    window.chrome = { runtime: { sendMessage: (m) => {
+      if (m && m.type === 'ask') { window.__asked.push(m.payload);
+        const i = window.__asked.length - 1;
+        return Promise.resolve({ index: window.__scripted[i] ?? 0, confidence: 0.9 }); }
+      return Promise.resolve({ error: 'unstubbed' }); }, onMessage: { addListener(){} } },
+      storage: { local: { get: (k, cb) => cb ? cb({}) : Promise.resolve({}), set: (o) => { window.__stored = o; return Promise.resolve(); } }, onChanged: { addListener(){} } } };
+    'ok'`);
+  await s.eval(CONTENT_JS, { awaitPromise: false });
+  await s.eval(`window.__alefSolver.solveLesson()`, { awaitPromise: false });
+  for (let i = 0; i < 160; i++) {
+    await new Promise(r => setTimeout(r, 250));
+    if ((await s.eval(`window.__lessonSubmissions.length`)) >= 3) break;
+  }
+  // After the last answer the run waits a few seconds for a Next that is never coming, and only then looks for Done.
+  for (let i = 0; i < 60; i++) {
+    if (/last question/i.test(await s.eval(`(document.getElementById('alef-solver-hud') || {}).textContent || ''`))) break;
+    await new Promise(r => setTimeout(r, 250));
+  }
+  const autoSubs = await s.eval(`JSON.stringify(window.__lessonSubmissions)`);
+  const autoHud = await s.eval(`(document.getElementById('alef-solver-hud') || {}).textContent || ''`);
+  check('(fixture) the page moved on by itself, with no Next button pressed', await s.eval(`window.__autoAdvanced`) === 2 && await s.eval(`window.__advanced`) === 0, `autoAdvanced=${await s.eval(`window.__autoAdvanced`)} advanced=${await s.eval(`window.__advanced`)}`);
+  check('all three questions were answered', autoSubs === '[1,2,0]', autoSubs);
+  check('the model was asked once per question', (await s.eval(`window.__asked.length`)) === 3);
+  check('it stopped at the last question, naming the Done button — not at the first', /last question/i.test(autoHud) && /Done/.test(autoHud), JSON.stringify(autoHud));
+
+  // And when a lesson really does end with nothing to press, the stop says so AND leaves a fresh report: it used
+  // to leave none, so "Copy last report" handed back one from an older run on another page.
+  console.log('\na lesson that ends with nothing to press');
+  await s.goto(url + '&auto=1&nodone=1');
+  await s.eval(`
+    window.__asked = []; window.__scripted = [1,2,0]; window.__stored = null;
+    window.chrome = { runtime: { sendMessage: (m) => {
+      if (m && m.type === 'ask') { window.__asked.push(m.payload);
+        const i = window.__asked.length - 1;
+        return Promise.resolve({ index: window.__scripted[i] ?? 0, confidence: 0.9 }); }
+      return Promise.resolve({ error: 'unstubbed' }); }, onMessage: { addListener(){} } },
+      storage: { local: { get: (k, cb) => cb ? cb({}) : Promise.resolve({}), set: (o) => { window.__stored = Object.assign(window.__stored || {}, o); return Promise.resolve(); } }, onChanged: { addListener(){} } } };
+    'ok'`);
+  await s.eval(CONTENT_JS, { awaitPromise: false });
+  await s.eval(`window.__alefSolver.solveLesson()`, { awaitPromise: false });
+  for (let i = 0; i < 200; i++) {
+    await new Promise(r => setTimeout(r, 250));
+    if (await s.eval(`!!(window.__stored && window.__stored.lastReport)`)) break;
+  }
+  const noNextReport = await s.eval(`String((window.__stored || {}).lastReport || '')`);
+  check('all three were answered before it stopped', (await s.eval(`window.__lessonSubmissions.length`)) === 3);
+  check('a fresh report was saved, naming the stage and what the page looked like', /stage:\s+no-next/.test(noNextReport) && /answered, but there is no Next button/.test(noNextReport) && /=== alef-solver dump ===/.test(noNextReport), noNextReport.slice(0, 160).replace(/\n/g, ' | '));
+  check('and the status line points at it', /Copy last report|Developer mode/.test(await s.eval(`(document.getElementById('alef-solver-hud') || {}).textContent || ''`)));
 
   s.close();
   console.log(`\n${fail === 0 ? '✓ all' : '✗'} ${pass} passed, ${fail} failed\n`);

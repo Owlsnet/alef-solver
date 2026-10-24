@@ -11,6 +11,12 @@
      ?lag=1         a card changes 300ms after the press (the page's own state is asynchronous)
      ?inner=1       the card itself ignores a press; only the little button inside it ticks it
      ?stick=3       the page refuses to tick card 3 (it flips straight back)
+     ?need=2        Submit stays switched off until 2 are ticked (one is not enough), as the live page did
+                    on another question with two right answers
+     ?max=2         the page takes only 2 ticks at once and quietly ignores a third, as the live page did
+                    on a question with two right answers (it never says how many it takes)
+     ?nostem=1      the question's own text is missing from the page (a question the live run met, where
+                    the only text above the cards was the instruction "Select the correct answers.")
      ?header=1      the site's own header, with two switches of its own (role=checkbox)
      ?radio=1       the same question as single choice (role=radio), for comparison
      ?bare=1        no answer cards at all — a page with only the header's two switches and the
@@ -54,6 +60,9 @@
   const ROLE = RADIO ? 'radio' : 'checkbox';
   const RIGHT = [1, 4];
   const STICK = Q.has('stick') ? Number(Q.get('stick')) : -1;
+  const MAX = Q.has('max') ? Number(Q.get('max')) : 0;
+  const NEED = Q.has('need') ? Number(Q.get('need')) : 1;
+  window.__refused = [];       // presses the page ignored because it already held its limit
   const LAG = Q.has('lag');
   const INNER = Q.has('inner');
 
@@ -99,7 +108,7 @@
     <div class="wrap">
       <div class="lib-mcq-container lib-text lib-question-widget"><div class="lib-mcq-widget-wrapper">
         <div id="question-statement-1" class="lib-question-statement-container" data-testid="question-statement-c">
-          <span class="lib-html-container lib-html-text lib-has-equation"><span><span class="lib-html-text-wrapper lib-has-equation">${stem}</span></span></span>
+          <span class="lib-html-container lib-html-text lib-has-equation"><span><span class="lib-html-text-wrapper lib-has-equation">${Q.has('nostem') ? '' : stem}</span></span></span>
         </div>
         ${Q.has('bare') ? '' : `<div class="lib-options-container"><div class="lib-options-container-wrapper">
           <h3 id="question-instruction" class="lib-instruction-label" data-testid="question-instruction">${RADIO ? 'Select the correct answer.' : 'Select the correct answers.'}</h3>
@@ -120,11 +129,12 @@
   const cards = [...document.querySelectorAll('.lib-mcq-option-container')];
   const submit = document.getElementById('submit');
   const ticked = () => cards.map((c, i) => (c.getAttribute('aria-checked') === 'true' ? i : -1)).filter(i => i >= 0);
-  const refresh = () => { submit.disabled = ticked().length === 0; };
+  const refresh = () => { submit.disabled = ticked().length < Math.max(1, NEED); };
 
   const flip = c => {
     const i = Number(c.dataset.i);
     const apply = () => {
+      if (!RADIO && MAX && c.getAttribute('aria-checked') !== 'true' && ticked().length >= MAX) { window.__refused.push(i); return; }
       if (RADIO) { for (const k of cards) k.setAttribute('aria-checked', k === c ? 'true' : 'false'); }
       else c.setAttribute('aria-checked', c.getAttribute('aria-checked') === 'true' ? 'false' : 'true');
       if (i === STICK) setTimeout(() => { c.setAttribute('aria-checked', 'false'); refresh(); }, 30);

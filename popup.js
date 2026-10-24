@@ -1,4 +1,4 @@
-const KEYS = ['autoSubmit', 'openPassage', 'screenshot', 'apiKey', 'provider', 'geminiKey', 'advance', 'cachePassage', 'devMode', 'hotkeys', 'autoNextLesson', 'skipLater'];
+const KEYS = ['autoSubmit', 'openPassage', 'screenshot', 'apiKey', 'provider', 'geminiKey', 'openaiKey', 'advance', 'cachePassage', 'devMode', 'hotkeys', 'autoNextLesson', 'skipLater'];
 
 // Developer mode (set in Options) shows Dump and Copy last report. Reports are saved
 // either way; the switch only decides whether there is a button to copy one.
@@ -34,7 +34,7 @@ async function load() {
   document.getElementById('autoNextLesson').checked = s.autoNextLesson === true;     // off until switched on
   document.getElementById('skipLater').checked = s.skipLater !== false;              // on unless switched off
   // The warning is about the key of the service that is chosen: a Gemini key does nothing for OpenRouter.
-  document.getElementById('warn').classList.toggle('on', !(s.provider === 'gemini' ? s.geminiKey : s.apiKey));
+  document.getElementById('warn').classList.toggle('on', !(s.provider === 'gemini' ? s.geminiKey : s.provider === 'openai' ? s.openaiKey : s.apiKey));
   document.getElementById('ver').textContent = ` · v${BUILD}`;
   dev = s.devMode === true;
   document.getElementById('dump').hidden = !dev;

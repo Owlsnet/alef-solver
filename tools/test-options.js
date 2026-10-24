@@ -208,6 +208,61 @@ const STUB = (store = {}) => `
   await click('test');
   check('with no key it asks for one', await status() === 'Paste a key first.');
 
+  /* ------------------------------------------------------------------- OpenAI */
+  console.log('\n=== OpenAI: fields, saving, Test key ===');
+  const OKEY = 'sk-test-OPENAI-FAKE-KEY-123';
+  await open({});
+  await choose('openai');
+  check('choosing OpenAI shows its fields and only those', await shown('openaiFields') === true && await shown('openrouterFields') === false && await shown('geminiFields') === false);
+  check('its model box starts with the default model, and the key box is a password box', await val('openaiModel') === 'gpt-5-mini' && await ev(`document.getElementById('openaiKey').type`) === 'password', await val('openaiModel'));
+  await choose('gemini');
+  check('going on to Gemini hides them again', await shown('openaiFields') === false && await shown('geminiFields') === true);
+
+  await open({ provider: 'openai', openaiKey: OKEY, openaiModel: 'gpt-4.1-mini', openaiFallbackModel: 'gpt-4o-mini', apiKey: 'sk-or-v1-abc', geminiKey: KEY });
+  check('a saved OpenAI choice opens on OpenAI, filled in, the others kept out of sight', await val('provider') === 'openai' && await shown('openaiFields') === true && await val('openaiKey') === OKEY && await val('openaiModel') === 'gpt-4.1-mini' && await val('openaiFallbackModel') === 'gpt-4o-mini' && await val('apiKey') === 'sk-or-v1-abc' && await val('geminiKey') === KEY);
+
+  await open({ hotkeys: { solve: null } });
+  await choose('openai');
+  await setVal('openaiKey', `  ${OKEY}  `);
+  await setVal('openaiModel', '   ');
+  await click('save');
+  st = await ev(`JSON.stringify(window.__store)`).then(JSON.parse);
+  check('saving keeps the service, the trimmed key, and the default for an empty model box', st.provider === 'openai' && st.openaiKey === OKEY && st.openaiModel === 'gpt-5-mini', JSON.stringify({ p: st.provider, k: st.openaiKey === OKEY, m: st.openaiModel }));
+  check('and loses nothing that was already saved', st.hotkeys && st.hotkeys.solve === null);
+
+  await open({ provider: 'openai', openaiKey: OKEY, openaiModel: 'gpt-5-mini' });
+  await reply({ json: { choices: [{ message: { content: 'ok' } }] } });
+  await reply({ json: { data: [{ id: 'gpt-5-mini' }, { id: 'gpt-4o-mini' }, { id: 'text-embedding-3-small' }, { id: 'whisper-1' }, { id: 'gpt-4o-mini-tts' }, { id: 'dall-e-3' }, { id: 'o3' }, { id: 'gpt-image-1' }, { id: 'omni-moderation-latest' }, { id: 'gpt-4o-mini' }] } });
+  await click('test');
+  f = await fetches();
+  check('Test key asks the chosen model, by name, with a POST and a Bearer login', f[0].method === 'POST' && f[0].url === 'https://api.openai.com/v1/chat/completions' && f[0].headers.Authorization === 'Bearer ' + OKEY && JSON.parse(f[0].body).model === 'gpt-5-mini', f[0].url);
+  check('with the one-word question and room for a model that thinks first', /Reply with the single word: ok/.test(f[0].body) && JSON.parse(f[0].body).max_completion_tokens === 256 && !('max_tokens' in JSON.parse(f[0].body)));
+  check('the key is in no address and no body', f.every(x => !x.url.includes(OKEY) && !x.body.includes(OKEY)));
+  check('then it lists the models this key may use', f.length === 2 && f[1].method === 'GET' && f[1].url === 'https://api.openai.com/v1/models' && f[1].headers.Authorization === 'Bearer ' + OKEY, f[1] && f[1].url);
+  const oOpts = await ev(`JSON.stringify([...document.getElementById('openaiModels').options].map(o => o.value))`).then(JSON.parse);
+  check('the list becomes the chat models only, once each, sorted — no embeddings, speech, image or moderation models', JSON.stringify(oOpts) === JSON.stringify(['gpt-4o-mini', 'gpt-5-mini', 'o3']), JSON.stringify(oOpts));
+  check('and the status says what it answered and how many it found', /✓ gpt-5-mini responded: "ok"/.test(await status()) && /3 models/.test(await status()), await status());
+
+  await open({ provider: 'openai', openaiKey: OKEY, openaiModel: 'gpt-3.5-turbo' });
+  await reply({ ok: false, status: 400, text: '{"error":{"message":"Unsupported parameter: \'max_completion_tokens\' is not supported with this model. Use \'max_tokens\' instead."}}' });
+  await reply({ json: { choices: [{ message: { content: 'ok' } }] } });
+  await reply({ ok: false, status: 500, text: 'boom' });
+  await click('test');
+  f = await fetches();
+  check('an older model that wants max_tokens is tried that way, and the test passes', f.length === 3 && 'max_tokens' in JSON.parse(f[1].body) && !('max_completion_tokens' in JSON.parse(f[1].body)) && /✓ gpt-3\.5-turbo responded/.test(await status()), await status());
+  check('a model list that cannot be read does not spoil a good test; the suggestions stay', !/models available/.test(await status()) && (await ev(`document.getElementById('openaiModels').options.length`)) === 4);
+
+  await open({ provider: 'openai', openaiKey: OKEY });
+  await reply({ ok: false, status: 401, text: '{"error":{"message":"Incorrect API key provided","code":"invalid_api_key"}}' });
+  await click('test');
+  f = await fetches();
+  check('a refused key says so with the status and OpenAI\'s words, and goes no further', /^HTTP 401/.test(await status()) && /Incorrect API key/.test(await status()) && f.length === 1 && await ev(`document.getElementById('status').className`) === 'bad', await status());
+  check('without repeating the key', !(await status()).includes(OKEY));
+
+  await open({ provider: 'openai' });
+  await click('test');
+  check('with no key it asks for one, and sends nothing', await status() === 'Paste an OpenAI key first.' && (await fetches()).length === 0, await status());
+
   s.close();
   console.log(`\n${fail === 0 ? '✓ all' : '✗'} ${pass} passed, ${fail} failed\n`);
   cleanup();

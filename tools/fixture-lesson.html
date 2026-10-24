@@ -409,10 +409,19 @@
       if (!BOTH) return;
     }
 
+    // ?auto=1: a lesson that moves on by itself. A right answer is shown for a moment and then the next
+    // question is simply there — no Next button at all (the live case: the status line said "no Next
+    // button, so nothing more to do here" over a fresh, unanswered question).
+    if (PARAMS.get('auto') === '1' && right && q < QUESTIONS.length - 1) {
+      window.__autoAdvanced = (window.__autoAdvanced || 0) + 1;
+      setTimeout(() => { q++; render(); }, 900);
+      return;
+    }
+
     // Next appears only if there is a next question. (&tail=1: or a closing screen.)
     if (q < QUESTIONS.length - 1 || TAIL) el('next').style.display = '';
-    // The last question ends with "Done", as on the live page — not "Next".
-    else el('done').style.display = '';
+    // The last question ends with "Done", as on the live page — not "Next". (?nodone=1: with nothing at all.)
+    else if (PARAMS.get('nodone') !== '1') el('done').style.display = '';
     window.__fixtureSubmitted = true;
   });
 

@@ -6,14 +6,18 @@
 
 const API = 'https://openrouter.ai/api/v1/chat/completions';
 const GEMINI_API = 'https://generativelanguage.googleapis.com/v1beta';
+const OPENAI_API = 'https://api.openai.com/v1/chat/completions';
 const DEFAULTS = {
-  provider: 'openrouter',          // 'openrouter' | 'gemini': which service answers
+  provider: 'openrouter',          // 'openrouter' | 'gemini' | 'openai': which service answers
   apiKey: '',
   model: 'deepseek/deepseek-v4.1-flash',
   fallbackModel: '',
   geminiKey: '',                   // a key from Google AI Studio; used only when provider is 'gemini'
   geminiModel: 'gemini-2.5-flash',
   geminiFallbackModel: '',
+  openaiKey: '',                   // an API key from platform.openai.com (not a ChatGPT login); used only when provider is 'openai'
+  openaiModel: 'gpt-5-mini',
+  openaiFallbackModel: '',
   autoSubmit: true,
   openPassage: true,
   screenshot: 'auto', // 'auto' | 'always' | 'never'
@@ -221,9 +225,24 @@ function buildQuestionText(p) {
 
   if (p.passage) lines.push('=== PASSAGE ===', p.passage, '', '');
 
-  lines.push('=== QUESTION ===', p.stem || '(no question text found)', '');
+  // Some questions keep their real text where the page's own text does not reach (a picture, say), and the
+  // only "question" found is the instruction line itself. Say so, rather than let it pass for the question.
+  const squash = s => String(s || '').replace(/\s+/g, ' ').trim();
+  const onlyInstruction = !!p.multi && !!p.instruction && squash(p.stem) === squash(p.instruction);
+  lines.push('=== QUESTION ===',
+    onlyInstruction ? '(The page\'s text holds no question, only the instruction below. If a picture is attached, the question is in it.)'
+                    : (p.stem || '(no question text found)'), '');
 
   if (p.multi && p.instruction) lines.push('=== INSTRUCTION ===', p.instruction, '');
+  // The page was seen to take only so many ticks (it does not say how many, and ignores the rest).
+  if (p.multi && p.maxPicks) {
+    lines.push('=== LIMIT ===',
+      `The page accepts at most ${p.maxPicks} ticked choices. Give exactly ${p.maxPicks}: the ${p.maxPicks} that are most clearly correct.`, '');
+  } else if (p.multi && p.minPicks) {
+    // ...or kept Submit switched off until enough were ticked.
+    lines.push('=== LIMIT ===',
+      `The page keeps Submit switched off until at least ${p.minPicks} choices are ticked. Give at least ${p.minPicks}: the ${p.minPicks} that are most clearly correct, and more only if you are sure of them.`, '');
+  }
 
   if (p.options?.length) {
     lines.push(p.multi ? '=== CHOICES (more than one may be correct) ===' : '=== CHOICES ===');
@@ -310,10 +329,23 @@ function toGemini(body, structured) {
   };
 }
 
+/** The chat-shaped request for OpenAI's own API. It takes the same messages, but the newer models
+ *  want the limit called max_completion_tokens, and the reasoning ones (gpt-5…, o1…) accept no
+ *  temperature at all. `opts` can undo either, for a model that turns out to want it the old way. */
+function toOpenAI(body, model, structured, opts = {}) {
+  const { max_tokens, temperature, ...rest } = body;
+  const req = { ...rest, model };
+  req[opts.legacyTokens ? 'max_tokens' : 'max_completion_tokens'] = max_tokens;
+  if (!opts.noTemperature && !/^(?:o\d|gpt-5)/i.test(String(model).trim())) req.temperature = temperature;
+  if (structured) req.response_format = { type: 'json_object' };
+  if (opts.lowEffort && /^(?:o\d|gpt-5)/i.test(String(model).trim())) req.reasoning_effort = 'low';
+  return req;
+}
+
 // How a service says the model it was asked for cannot take a picture. Not matched: a failure to
 // FETCH a picture ("Received 401 status code when fetching image from URL"), which says nothing
 // about the model.
-const NO_VISION = /(?:support|supports|supported|enabled)[^.]{0,40}image (?:input|modality)|image (?:input|modality)[^.]{0,40}(?:not|n't) (?:supported|enabled|available)|(?:not|n't) support[^.]{0,25}(?:image|vision)|no endpoints found that support image/i;
+const NO_VISION = /(?:support|supports|supported|enabled)[^.]{0,40}image (?:input|modality)|image (?:input|modality)[^.]{0,40}(?:not|n't) (?:supported|enabled|available)|(?:not|n't) support[^.]{0,25}(?:image|vision)|image_url[^.]{0,40}only supported by certain models|no endpoints found that support image/i;
 
 // Why Gemini may return no text at all: it refused. Asking again with more room will not help.
 const GEMINI_BLOCKS = /^(SAFETY|PROHIBITED_CONTENT|BLOCKLIST|SPII|IMAGE_SAFETY|RECITATION|LANGUAGE|OTHER)$/;
@@ -443,7 +475,7 @@ function parsePairs(raw, leftCount, rightCount) {
  *  when the two disagree (a letter is read off the choice itself; a zero-based number is where a
  *  model slips by one). Anything out of range, repeated, or unreadable is rejected, never repaired:
  *  a repaired answer is a guess. */
-function parseMulti(raw, count) {
+function parseMulti(raw, count, max, min) {
   if (!raw) return null;
   const text = String(raw).trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
   const s = text.indexOf('{'), e = text.lastIndexOf('}');
@@ -468,6 +500,8 @@ function parseMulti(raw, count) {
 
   const picked = fromLetters || fromNumbers;
   if (!picked) return null;
+  if (max && picked.length > max) return null;      // the page will not take more than this many ticks
+  if (min && picked.length < min) return null;      // and keeps Submit off until it has this many
   const agree = !fromLetters || !fromNumbers || [...fromLetters].sort().join() === [...fromNumbers].sort().join();
   return {
     indices: [...picked].sort((a, b) => a - b),
@@ -518,13 +552,18 @@ function parseAnswer(raw) {
 async function ask(payload) {
   const cfg = await settings();
   const gemini = cfg.provider === 'gemini';
-  if (gemini ? !cfg.geminiKey : !cfg.apiKey) {
+  const openai = cfg.provider === 'openai';
+  if (gemini ? !cfg.geminiKey : openai ? !cfg.openaiKey : !cfg.apiKey) {
     return { error: gemini ? 'No Gemini API key set — open the extension Options and paste one.'
-                           : 'No API key set — open the extension Options and paste one.' };
+                  : openai ? 'No OpenAI API key set — open the extension Options and paste one.'
+                  : 'No API key set — open the extension Options and paste one.' };
   }
 
   // A model box saved empty means "the default", not "no model to ask".
-  const chain = (gemini ? [cfg.geminiModel || DEFAULTS.geminiModel, cfg.geminiFallbackModel] : [cfg.model, cfg.fallbackModel]).filter(Boolean);
+  const chain = (gemini ? [cfg.geminiModel || DEFAULTS.geminiModel, cfg.geminiFallbackModel]
+               : openai ? [cfg.openaiModel || DEFAULTS.openaiModel, cfg.openaiFallbackModel]
+               : [cfg.model, cfg.fallbackModel]).filter(Boolean);
+  const oa = {};                 // OpenAI only: what a model has turned out not to accept (see toOpenAI)
   let body = buildBody(cfg, payload);
   let imageDropped = false;
   const errors = [];
@@ -539,8 +578,18 @@ async function ask(payload) {
         body: JSON.stringify(toGemini(body, structured)),
       });
     }
+    if (openai) {
+      return fetch(OPENAI_API, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${cfg.openaiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(toOpenAI(body, model, structured, { ...oa, lowEffort: !!thinking })),
+      });
+    }
     const reqBody = { ...body, model };
     if (structured) reqBody.response_format = { type: 'json_object' };
+    // OpenRouter's own settings; a model with no thinking to adjust ignores them.
+    if (thinking === 'off') reqBody.reasoning = { enabled: false };
+    else if (thinking === 'low') reqBody.reasoning = { effort: 'low' };
     return fetch(API, {
       method: 'POST',
       headers: {
@@ -554,6 +603,21 @@ async function ask(payload) {
   };
 
   let tokensRaised = false;
+  // After a reply cut off while the model was still thinking: what to ask of its thinking on the retry —
+  // 'off' first (a model that can think or not, answers straight away), 'low' if the service refuses that.
+  let thinking = '';
+  const NUDGE = '\n\nThis is a retry: the earlier reply ran out of room before it gave an answer. Do not deliberate at length. Reply now with the JSON object only.';
+  // The body as the retry sends it: more room, and the nudge. Kept when the body has to be rebuilt (a picture
+  // dropped), or the retry would silently go back to the small budget it just ran out of.
+  const forRetry = b => {
+    const user = b.messages[1];
+    return {
+      ...b,
+      max_tokens: RETRY_TOKENS,
+      messages: [b.messages[0], { ...user, content: user.content.map((c, i) => (i === 0 && c.type === 'text' ? { ...c, text: c.text + NUDGE } : c)) }],
+    };
+  };
+  const rebuilt = extra => { const b = buildBody(cfg, { ...payload, ...extra }); return tokensRaised ? forRetry(b) : b; };
 
   /** One round trip. Resolves { parsed } on success, or { error, then } where
    *  `then` says what the caller should do next: 'network' (give up on this
@@ -578,6 +642,32 @@ async function ask(payload) {
         return { error: `${model}: Gemini refused the request (HTTP ${res.status}) — check the key in Options. ${detail.slice(0, 160)}`, then: 'stop' };
       }
 
+      // OpenAI says a wrong key as a 401. Every model would be refused the same way: stop, and say what to check.
+      if (openai && (res.status === 401 || /invalid_api_key|Incorrect API key/i.test(detail))) {
+        return { error: `${model}: OpenAI refused the key (HTTP ${res.status}) — check it in Options. ${detail.slice(0, 160)}`, then: 'stop' };
+      }
+
+      // OpenRouter was told to switch thinking off and the model will not have it (some think whether asked
+      // or not): ask for less of it instead.
+      if (!gemini && !openai && thinking === 'off' && res.status === 400 && /reasoning/i.test(detail)) {
+        thinking = 'low';
+        errors.push(`${model}: cannot switch thinking off — asked for less of it`);
+        return attempt(model, structured);
+      }
+
+      // The newer OpenAI models take no temperature and call the limit max_completion_tokens; older ones
+      // want max_tokens. The first answer is a 400 naming the thing; ask again the other way, once each.
+      if (openai && res.status === 400 && /temperature/i.test(detail) && !oa.noTemperature) {
+        oa.noTemperature = true;
+        errors.push(`${model}: takes no temperature — asked without`);
+        return attempt(model, structured);
+      }
+      if (openai && res.status === 400 && /max_completion_tokens/i.test(detail) && !oa.legacyTokens) {
+        oa.legacyTokens = true;
+        errors.push(`${model}: takes max_tokens, not max_completion_tokens — asked that way`);
+        return attempt(model, structured);
+      }
+
       // A model that cannot read pictures at all says so — OpenRouter as a 404 ("No endpoints found
       // that support image input"), others as a 400. That is a fact about the model, not about this
       // picture: the next model may well read it, so it is tried next, picture and all. Only when
@@ -592,7 +682,7 @@ async function ask(payload) {
       // without any images; the prompt then says the figure couldn't be attached.
       if (res.status === 400 && /image/i.test(detail) && hasImages(body)) {
         errors.push(`${model}: dropped the images (${detail.slice(0, 90)})`);
-        body = buildBody(cfg, { ...payload, image: null, images: [] });
+        body = rebuilt({ image: null, images: [] });
         imageDropped = true;
         return attempt(model, structured);
       }
@@ -611,6 +701,7 @@ async function ask(payload) {
       raw = choice?.message?.content ?? '';
       finish = choice?.finish_reason || choice?.native_finish_reason || '';
       tokens = json?.usage?.completion_tokens;
+      if (!raw && choice?.message?.refusal) blocked = 'refusal';      // the model declined: asking again will not help
     }
 
     const parsed = payload.kind === 'cloze' ? parseCloze(raw, payload.cloze?.blanks?.length)
@@ -618,7 +709,7 @@ async function ask(payload) {
       : payload.kind === 'match' ? parsePairs(raw, payload.match?.left?.length, payload.match?.right?.length)
       : payload.kind === 'drag' ? parsePairs(raw, payload.drag?.blanks, payload.drag?.items?.length)
       : payload.kind === 'sort' ? parsePairs(raw, payload.sort?.items?.length, payload.sort?.items?.length)
-      : payload.multi ? parseMulti(raw, payload.options?.length)
+      : payload.multi ? parseMulti(raw, payload.options?.length, payload.maxPicks, payload.minPicks)
       : parseAnswer(raw);
 
     if (parsed) {
@@ -630,8 +721,9 @@ async function ask(payload) {
     // room and ask once more, rather than failing a question it could answer.
     if (!tokensRaised && !blocked && (finish === 'length' || !String(raw).trim())) {
       tokensRaised = true;
-      body = { ...body, max_tokens: RETRY_TOKENS };
-      errors.push(`${model}: empty reply (finish_reason=${finish || 'none'}) — retried with ${RETRY_TOKENS} tokens`);
+      thinking = 'off';
+      body = forRetry(body);
+      errors.push(`${model}: empty reply (finish_reason=${finish || 'none'}) — retried with ${RETRY_TOKENS} tokens, no extended thinking, and told to answer at once`);
       return attempt(model, structured);
     }
 
@@ -639,7 +731,9 @@ async function ask(payload) {
       error: `${model}: unparseable reply ${JSON.stringify(String(raw).slice(0, 120))} ` +
              `(finish_reason=${finish || 'none'}${blocked ? `, refused=${blocked}` : ''}, completion_tokens=${tokens ?? '?'}, ` +
              `max_tokens=${body.max_tokens})`,
-      then: blocked ? 'model' : 'again',     // a refusal is the same however it is asked
+      // A refusal is the same however it is asked; so is a model that ran out of room twice with its
+      // thinking — plain mode instead of JSON mode would only spend it again.
+      then: blocked || (tokensRaised && finish === 'length') ? 'model' : 'again',
     };
   };
 
@@ -667,7 +761,7 @@ async function ask(payload) {
   // the person can pick a model that sees pictures.
   if (!got && blind.size && hasImages(body)) {
     errors.push('no model on the list can read pictures — asking again without the picture');
-    body = buildBody(cfg, { ...payload, image: null, images: [] });
+    body = rebuilt({ image: null, images: [] });
     imageDropped = true;
     got = await runChain();
   }

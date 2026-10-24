@@ -69,6 +69,7 @@
   <select id="provider">
     <option value="openrouter">OpenRouter (one key, many models)</option>
     <option value="gemini">Google Gemini (your own Google key)</option>
+    <option value="openai">OpenAI, the ChatGPT models (your own OpenAI key)</option>
   </select>
   <div class="hint">Only the one chosen here is used. Each keeps its own key and model below.</div>
 
@@ -111,6 +112,26 @@
 
   <label for="geminiFallbackModel">Fallback model (optional)</label>
   <input id="geminiFallbackModel" list="geminiModels" placeholder="tried if the first one fails" spellcheck="false">
+  <div class="hint">If a model is rate-limited or unavailable, the tool tries this one. A wrong key stops at once, since another model would be refused too.</div>
+  </div>
+
+  <div id="openaiFields" hidden>
+  <label for="openaiKey">OpenAI API key</label>
+  <input id="openaiKey" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false">
+  <div class="hint">Get one at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">platform.openai.com/api-keys</a>. This is the developer API, which is billed on its own: a ChatGPT subscription does not include it, and a ChatGPT login will not work here. The key is sent only to OpenAI, to call the model below.</div>
+
+  <label for="openaiModel">OpenAI model</label>
+  <input id="openaiModel" list="openaiModels" spellcheck="false">
+  <datalist id="openaiModels">
+    <option value="gpt-5-mini">gpt-5-mini</option>
+    <option value="gpt-5">gpt-5</option>
+    <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+    <option value="gpt-4o-mini">gpt-4o-mini</option>
+  </datalist>
+  <div class="hint">These are only suggestions. After “Test key” works, this list is replaced by the models your key can actually use. The model must accept images if you want diagram questions solved.</div>
+
+  <label for="openaiFallbackModel">Fallback model (optional)</label>
+  <input id="openaiFallbackModel" list="openaiModels" placeholder="tried if the first one fails" spellcheck="false">
   <div class="hint">If a model is rate-limited or unavailable, the tool tries this one. A wrong key stops at once, since another model would be refused too.</div>
   </div>
 

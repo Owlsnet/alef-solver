@@ -2737,7 +2737,7 @@
   /** Solve one question. Returns a result the run loop can act on. `tried` is
    *  every answer the page has already marked wrong; the result's `attempt` says
    *  what was answered this time, so the caller can add it to that list. */
-  async function solveOne(quiet = false, { tried = [] } = {}) {
+  async function solveOne(quiet = false, { tried = [], limit = 0, need = 0, again = 0 } = {}) {
     const say = m => { if (!quiet) hud(m); };
 
     const p0 = scrape();
@@ -2796,6 +2796,8 @@
         passage,
         options: p.options.map(o => ({ text: o.text })),
         multi: p.multi,
+        maxPicks: p.multi && limit ? limit : undefined,      // how many ticks the page was seen to take
+        minPicks: p.multi && need ? need : undefined,        // how many it was seen to want before Submit goes on
         instruction: p.instruction,
         tried: [...tried],          // a copy: the caller keeps adding to its own list
         cloze: p.cloze,
@@ -2966,6 +2968,18 @@
 
       if (CFG.autoSubmit) hud('ticking…');
       const out = await commitMulti(picks, { autoSubmit: CFG.autoSubmit, answerDelay: CFG.answerDelay });
+      // The page took fewer ticks than the model chose: it allows only so many, and does not say how
+      // many. Ask once more, told the number.
+      if (!out.selected && out.limit && !limit && again < 2) {
+        hud(`the page takes only ${out.limit} ticks — asking again for ${out.limit}`, true);
+        return solveOne(quiet, { tried, limit: out.limit, need, again: again + 1 });
+      }
+      // The reverse: every tick went in and Submit stays off, because the page wants more of them.
+      // Ask again for at least one more than were ticked — twice at most, so it cannot go on for ever.
+      if (out.selected && !out.submitted && out.needMore && out.needMore > need && (!limit || out.needMore <= limit) && again < 2) {
+        hud(`Submit stays off with ${out.needMore - 1} ticked — asking again for at least ${out.needMore}`, true);
+        return solveOne(quiet, { tried, limit, need: out.needMore, again: again + 1 });
+      }
       out.letter = letters.join('');
       out.ms = ms;
       out.confidence = ans.confidence;
@@ -3348,14 +3362,24 @@
 
         if (!CFG.advance) { hud(`✓ #${n + 1} done`); break; }
         if (!next) {
-          // No Next means the last question. The page's own way out is a button like
-          // "Finish" or "Done".
-          const fin = findButton('finish', null);
+          // No Next means the last question — or a lesson that moves on by itself: after Submit the next
+          // question is simply there, with no Next button at all. Look for that before taking it for the
+          // end. The page's own way out of a lesson is a button like "Finish" or "Done".
+          let fin = findButton('finish', null);
+          if (!fin && await waitForNextQuestion(key, 3500)) {
+            hud(`#${n + 1} done → the page moved on by itself`);
+            await sleep(CFG.stepDelay);
+            continue;
+          }
+          fin = fin || findButton('finish', null);       // it may have turned up while waiting
           if (fin) {
             if ((await endOfLesson(fin, n + 1, 'question')) === 'next') continue;
             break;
           }
-          hud(`✓ #${n + 1} answered; no Next button, so nothing more to do here.`, true);
+          // Keep what the page looked like: this stop used to leave no report, so "Copy last report"
+          // handed back one from some other page.
+          await saveReport('no-next', 'answered, but there is no Next button, no Finish, and no new question', { answered: n + 1, next: describeNav('next'), finish: describeNav('finish'), buttons: buttonLabels() }, n);
+          hud(`✓ #${n + 1} answered; no Next button, so nothing more to do here (${reportHint()} if the lesson had more).`, true);
           break;
         }
 
@@ -3522,7 +3546,10 @@
       sortItems: p.sort ? p.sort.items.map(i => i.text) : [],
       sortIntro: p.sort ? p.sort.intro : '',
       dragGaps: p.drag ? p.drag.zones.map(z => describe(z.el)) : [],
-      skeleton: (!p.kind || p.kind === 'match' || p.kind === 'dropdown' || p.kind === 'drag' || p.kind === 'sort')
+      // A choice question whose "question" is only its own instruction ("Select the correct answers.") has
+      // lost its real text somewhere — a picture, perhaps — and the outline is what shows where.
+      skeleton: (!p.kind || p.kind === 'match' || p.kind === 'dropdown' || p.kind === 'drag' || p.kind === 'sort' ||
+                 (p.kind === 'choice' && (!p.stem || (p.instruction && norm(p.stem) === norm(p.instruction)) || /^(?:select|choose|اخت)/i.test(arNorm(p.stem)) && p.stem.length < 60)))
         // From the page's main area, not the root: the sidebar would use up the whole budget
         // before the question was reached (it did, twice). And deeper when nothing was
         // recognised — a question type this does not know sits under many wrappers.
@@ -3940,7 +3967,10 @@
     const want = new Set(indices);
     const cardAt = i => findOptions()?.rows[i]?.el || null;     // looked up afresh: the page may redraw a card
     const trails = {};
-    for (let i = 0; i < p.options.length; i++) {
+    // Switch off what should not be on before switching on what should: a page that takes only so
+    // many ticks has no room for a new one until an old one is gone.
+    const order = p.options.map((_, i) => i).sort((a, b) => Number(want.has(a)) - Number(want.has(b)));
+    for (const i of order) {
       const on = want.has(i);
       const el = cardAt(i);
       if (!el || selected(el) === on) continue;
@@ -3959,12 +3989,29 @@
     out.selected = wrong.length === 0;
     if (!out.selected) {
       const tried = now.map((v, i) => (v !== want.has(i) && trails[i] ? `${'ABCDEFGHIJ'[i]}: ${trails[i].join(', ') || 'not pressed'}` : '')).filter(Boolean).join(' | ');
-      out.error = `the page did not keep the ticks on ${wrong.join(', ')} (ticked now: ${out.ticked || 'none'}, wanted: ${indices.map(i => 'ABCDEFGHIJ'[i]).join('')})${tried ? ` — ${tried}` : ''}`;
+      // Cards that would not tick while others stand ticked, and nothing wrong left on, is how a page
+      // says "no more": it takes only so many, and does not say how many. Report the number it took,
+      // so the caller can ask again for that many.
+      const badAt = now.map((v, i) => (v !== want.has(i) ? i : -1)).filter(i => i >= 0);
+      const stuck = now.filter(Boolean).length;
+      if (stuck > 0 && stuck < indices.length && badAt.every(i => want.has(i) && !now[i])) out.limit = stuck;
+      out.error = `the page did not keep the ticks on ${wrong.join(', ')} (ticked now: ${out.ticked || 'none'}, wanted: ${indices.map(i => 'ABCDEFGHIJ'[i]).join('')})${out.limit ? ` — it seems to take only ${out.limit} ticks` : ''}${tried ? ` — ${tried}` : ''}`;
       return out;
     }
 
     if (!autoSubmit) return out;
     await submitChoice(out, p, delay);
+    // Every wanted card is ticked and Submit still stands switched off: the page is waiting for more
+    // ticks (it wants as many as there are right answers, and does not say how many). Report the least
+    // it can want, so the caller can ask again for at least that many.
+    if (!out.submitted && out.error === 'no enabled submit button found') {
+      const off = findButton('submit', null, { requireEnabled: false });
+      const ticks = (out.ticked || '').length;
+      if (off && disabled(off) && ticks < p.options.length) {
+        out.needMore = ticks + 1;
+        out.error += ` — Submit stays off with ${ticks} ticked; the page may want more`;
+      }
+    }
     return out;
   }
 

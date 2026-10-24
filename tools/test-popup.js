@@ -164,6 +164,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('Gemini chosen, with a Gemini key: no warning', await warns({ provider: 'gemini', apiKey: '', geminiKey: 'AIza-test' }) === false);
   check('Gemini chosen, with only an OpenRouter key: warning (it is not the key that will be used)', await warns({ provider: 'gemini', apiKey: 'sk-test', geminiKey: '' }) === true);
   check('OpenRouter chosen, with only a Gemini key: warning', await warns({ provider: 'openrouter', apiKey: '', geminiKey: 'AIza-test' }) === true);
+  check('OpenAI chosen, with an OpenAI key: no warning', await warns({ provider: 'openai', apiKey: '', geminiKey: '', openaiKey: 'sk-test' }) === false);
+  check('OpenAI chosen, with only the other services\' keys: warning', await warns({ provider: 'openai', apiKey: 'sk-or-test', geminiKey: 'AIza-test', openaiKey: '' }) === true);
   check('the warning does not name one service', !/OpenRouter/.test(await s.eval(`document.getElementById('warn').textContent`)));
 
   /* --------------------------------------------------- Solve this question */

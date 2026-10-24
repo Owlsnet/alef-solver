@@ -1,7 +1,11 @@
 const FIELDS = ['provider', 'apiKey', 'model', 'fallbackModel', 'geminiKey', 'geminiModel', 'geminiFallbackModel',
+                'openaiKey', 'openaiModel', 'openaiFallbackModel',
                 'answerDelay', 'stepDelay', 'retries', 'devMode', 'hotkeys', 'maxLessons'];
 const GEMINI_API = 'https://generativelanguage.googleapis.com/v1beta';
 const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+const OPENAI_API = 'https://api.openai.com/v1';
+const DEFAULT_OPENAI_MODEL = 'gpt-5-mini';
+const SERVICES = ['openrouter', 'gemini', 'openai'];
 
 /* ------------------------------------------------------------- shortcuts */
 
@@ -118,13 +122,16 @@ async function load() {
   // name keeps its default, and one saved as null stays unset.
   hotkeys = { ...clone(DEFAULT_HOTKEYS), ...(s.hotkeys || {}) };
   renderKeys();
-  document.getElementById('provider').value = s.provider === 'gemini' ? 'gemini' : 'openrouter';
+  document.getElementById('provider').value = SERVICES.includes(s.provider) ? s.provider : 'openrouter';
   document.getElementById('apiKey').value = s.apiKey || '';
   document.getElementById('model').value = s.model || 'deepseek/deepseek-v4.1-flash';
   document.getElementById('fallbackModel').value = s.fallbackModel || '';
   document.getElementById('geminiKey').value = s.geminiKey || '';
   document.getElementById('geminiModel').value = s.geminiModel || DEFAULT_GEMINI_MODEL;
   document.getElementById('geminiFallbackModel').value = s.geminiFallbackModel || '';
+  document.getElementById('openaiKey').value = s.openaiKey || '';
+  document.getElementById('openaiModel').value = s.openaiModel || DEFAULT_OPENAI_MODEL;
+  document.getElementById('openaiFallbackModel').value = s.openaiFallbackModel || '';
   showProvider();
   document.getElementById('answerDelay').value = s.answerDelay ?? 120;
   document.getElementById('stepDelay').value = s.stepDelay ?? 250;
@@ -135,9 +142,10 @@ async function load() {
 
 /** Show the fields of the service that is chosen, and only those. */
 function showProvider() {
-  const gemini = document.getElementById('provider').value === 'gemini';
-  document.getElementById('openrouterFields').hidden = gemini;
-  document.getElementById('geminiFields').hidden = !gemini;
+  const which = document.getElementById('provider').value;
+  document.getElementById('openrouterFields').hidden = which !== 'openrouter';
+  document.getElementById('geminiFields').hidden = which !== 'gemini';
+  document.getElementById('openaiFields').hidden = which !== 'openai';
 }
 document.getElementById('provider').addEventListener('change', () => { showProvider(); status('Press Save to switch.'); });
 
@@ -153,13 +161,16 @@ function read() {
     return Math.max(0, Math.min(max, parseInt(el.value, 10) || 0));
   };
   return {
-    provider: document.getElementById('provider').value === 'gemini' ? 'gemini' : 'openrouter',
+    provider: SERVICES.includes(document.getElementById('provider').value) ? document.getElementById('provider').value : 'openrouter',
     apiKey: document.getElementById('apiKey').value.trim(),
     model: document.getElementById('model').value.trim() || 'deepseek/deepseek-v4.1-flash',
     fallbackModel: document.getElementById('fallbackModel').value.trim(),
     geminiKey: document.getElementById('geminiKey').value.trim(),
     geminiModel: document.getElementById('geminiModel').value.trim() || DEFAULT_GEMINI_MODEL,
     geminiFallbackModel: document.getElementById('geminiFallbackModel').value.trim(),
+    openaiKey: document.getElementById('openaiKey').value.trim(),
+    openaiModel: document.getElementById('openaiModel').value.trim() || DEFAULT_OPENAI_MODEL,
+    openaiFallbackModel: document.getElementById('openaiFallbackModel').value.trim(),
     answerDelay: num('answerDelay', 3000),
     stepDelay: num('stepDelay', 5000),
     retries: num('retries', 10),
@@ -226,8 +237,66 @@ async function testGemini() {
   }
 }
 
+/** Ask OpenAI which chat models this key may use, and offer exactly those (not embeddings, speech,
+ *  images or moderation). Best effort, like the Gemini list. Returns how many were found. */
+async function listOpenAIModels(key) {
+  try {
+    const res = await fetch(`${OPENAI_API}/models`, { headers: { Authorization: `Bearer ${key}` } });
+    if (!res.ok) return 0;
+    const j = await res.json();
+    const ids = [...new Set((j.data || []).map(m => String(m.id)))]
+      .filter(id => /^(?:gpt-|o\d|chatgpt-)/.test(id) && !/embed|audio|tts|whisper|image|moderation|realtime|transcribe|search|instruct|codex|dall-e|davinci|babbage/i.test(id))
+      .sort();
+    if (!ids.length) return 0;
+    const list = document.getElementById('openaiModels');
+    list.textContent = '';
+    for (const id of ids) {
+      const o = document.createElement('option');
+      o.value = id;
+      o.textContent = id;
+      list.append(o);
+    }
+    return ids.length;
+  } catch { return 0; }
+}
+
+async function testOpenAI() {
+  const { openaiKey, openaiModel } = read();
+  if (!openaiKey) { status('Paste an OpenAI key first.', 'bad'); return; }
+  status('Testing…');
+  try {
+    const ask = limit => fetch(`${OPENAI_API}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${openaiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: openaiModel,
+        messages: [{ role: 'user', content: 'Reply with the single word: ok' }],
+        [limit]: 256,                                     // room for a model that thinks first
+      }),
+    });
+    let res = await ask('max_completion_tokens');
+    if (res.status === 400) {                             // an older model that names the limit the old way
+      const d = (await res.text()).slice(0, 200);
+      if (!/max_completion_tokens/.test(d)) { status(`HTTP 400 — ${d}`, 'bad'); return; }
+      res = await ask('max_tokens');
+    }
+    if (!res.ok) {
+      const d = (await res.text()).slice(0, 200);
+      status(`HTTP ${res.status} — ${d}`, 'bad');
+      return;
+    }
+    const j = await res.json();
+    const reply = (j?.choices?.[0]?.message?.content || '').trim() || '(empty)';
+    const n = await listOpenAIModels(openaiKey);
+    status(`✓ ${openaiModel} responded: "${reply}"${n ? ` · ${n} models available to this key are in the list` : ''}`, 'ok');
+  } catch (e) {
+    status(`✗ ${e.message || e}`, 'bad');
+  }
+}
+
 document.getElementById('test').addEventListener('click', async () => {
   if (document.getElementById('provider').value === 'gemini') { await testGemini(); return; }
+  if (document.getElementById('provider').value === 'openai') { await testOpenAI(); return; }
   const { apiKey, model } = read();
   if (!apiKey) { status('Paste a key first.', 'bad'); return; }
   status('Testing…');

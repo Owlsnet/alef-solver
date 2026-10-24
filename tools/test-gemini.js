@@ -275,6 +275,172 @@ const useGemini = (extra = {}) => { store = { provider: 'gemini', geminiKey: KEY
   res = await ctx.ask(pic());
   check('if it still fails without the picture, it ends as an error and says why', !!res.error && /cannot read pictures/.test(res.error) && /asking again without the picture/.test(res.error), (res.error || '').slice(0, 160));
 
+  /* ------------------------------------------------------ OpenAI (ChatGPT models) */
+  console.log('\nOpenAI, the ChatGPT models');
+  const OKEY = 'sk-test-OPENAI-FAKE-KEY-123';
+  const useOpenAI = (extra = {}) => { store = { provider: 'openai', openaiKey: OKEY, ...extra }; };
+  const orLength = { ok: true, status: 200, text: async () => '', json: async () => ({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }) };
+
+  useOpenAI();
+  calls = script(orGood('{"answer":"B","index":1,"confidence":0.8,"why":"stated"}'));
+  res = await ctx.ask(mcq());
+  check('the answer comes back, from the default model', res.index === 1 && res.model === 'gpt-5-mini', j(res));
+  check('one POST to OpenAI\'s chat address', calls.length === 1 && calls[0].method === 'POST' && calls[0].url === 'https://api.openai.com/v1/chat/completions', calls[0].url);
+  check('the key is a Bearer login, and is nowhere else', calls[0].headers.Authorization === 'Bearer ' + OKEY && !calls[0].url.includes(OKEY) && !calls[0].raw.includes(OKEY));
+  check('no OpenRouter or Google headers go along', !('HTTP-Referer' in calls[0].headers) && !('X-Title' in calls[0].headers) && !('x-goog-api-key' in calls[0].headers));
+  check('the limit is called max_completion_tokens, never max_tokens', calls[0].body.max_completion_tokens === 1500 && !('max_tokens' in calls[0].body), j(Object.keys(calls[0].body)));
+  check('a gpt-5 model is sent no temperature (it accepts none)', !('temperature' in calls[0].body));
+  check('the first try asks for JSON', j(calls[0].body.response_format) === '{"type":"json_object"}');
+  check('the key does not come back in the result', !j(res).includes(OKEY));
+
+  useOpenAI({ openaiModel: 'gpt-4.1-mini' });
+  calls = script(orGood('{"answer":"B","index":1}'));
+  await ctx.ask(mcq());
+  check('a model that takes a temperature gets one (0 the first time)', calls[0].body.temperature === 0, j(calls[0].body.temperature));
+  calls = script(orGood('{"answer":"B","index":1}'));
+  await ctx.ask(mcq({ tried: [{ label: 'A. a' }] }));
+  check('and a warmer one after a wrong answer', calls[0].body.temperature > 0);
+  useOpenAI({ openaiModel: 'o3' });
+  calls = script(orGood('{"answer":"B","index":1}'));
+  await ctx.ask(mcq());
+  check('an o-series model is sent none either', !('temperature' in calls[0].body));
+
+  useOpenAI();
+  calls = script(orGood('{"answers":["A","C"],"indices":[0,2]}'));
+  res = await ctx.ask(mcq({ multi: true, instruction: 'Select the correct answers.' }));
+  check('a select-all question is read from an OpenAI reply', j(res.indices) === '[0,2]' && /MORE THAN ONE/.test(calls[0].body.messages[0].content), j(res));
+
+  useOpenAI({ openaiFallbackModel: 'gpt-4o-mini' });
+  calls = script(fail_(401, '{"error":{"message":"Incorrect API key provided: sk-test***. You can find your API key at https://platform.openai.com/account/api-keys.","type":"invalid_request_error","code":"invalid_api_key"}}'));
+  res = await ctx.ask(mcq());
+  check('a key OpenAI refuses stops at once — no second way of asking, no second model', calls.length === 1, `calls=${calls.length}`);
+  check('and says to check the key in Options', /check it in Options/.test(res.error || '') && /HTTP 401/.test(res.error || ''), res.error);
+  check('without repeating the key', !(res.error || '').includes(OKEY));
+
+  useOpenAI({ openaiModel: 'gpt-4o-mini' });
+  calls = script(fail_(400, '{"error":{"message":"Unsupported value: \'temperature\' does not support 0 with this model. Only the default (1) value is supported.","type":"invalid_request_error","param":"temperature"}}'), orGood('{"answer":"B","index":1}'));
+  res = await ctx.ask(mcq());
+  check('a model that takes no temperature is asked again without one', res.index === 1 && calls.length === 2 && ('temperature' in calls[0].body) && !('temperature' in calls[1].body), `calls=${calls.length}`);
+
+  useOpenAI({ openaiModel: 'gpt-3.5-turbo' });
+  calls = script(fail_(400, '{"error":{"message":"Unsupported parameter: \'max_completion_tokens\' is not supported with this model. Use \'max_tokens\' instead.","type":"invalid_request_error"}}'), orGood('{"answer":"B","index":1}'));
+  res = await ctx.ask(mcq());
+  check('a model that wants the old max_tokens is asked that way', res.index === 1 && calls.length === 2 && calls[1].body.max_tokens === 1500 && !('max_completion_tokens' in calls[1].body), `calls=${calls.length}`);
+
+  useOpenAI();
+  calls = script(orLength, orGood('{"answer":"C","index":2}'));
+  res = await ctx.ask(mcq());
+  check('a model that spent its room thinking is given more, once, under the same name', res.index === 2 && calls.length === 2 && calls[0].body.max_completion_tokens === 1500 && calls[1].body.max_completion_tokens === 4000, calls.map(c => c.body.max_completion_tokens).join(','));
+
+  calls = script({ ok: true, status: 200, text: async () => '', json: async () => ({ choices: [{ message: { content: null, refusal: "I can't help with that." }, finish_reason: 'stop' }] }) });
+  res = await ctx.ask(mcq());
+  check('a refusal is not asked again with more room, and says it was one', calls.length === 1 && /refused=refusal/.test(res.error || ''), `calls=${calls.length} ${res.error}`);
+
+  useOpenAI({ openaiFallbackModel: 'gpt-4o-mini' });
+  calls = script(fail_(429, '{"error":{"message":"Rate limit reached","code":"rate_limit_exceeded"}}'), orGood('{"answer":"B","index":1}'));
+  res = await ctx.ask(mcq());
+  check('a rate limit moves on to the fallback model', res.index === 1 && res.model === 'gpt-4o-mini' && calls.length === 2 && calls[1].body.model === 'gpt-4o-mini', calls.map(c => c.body.model).join(' → '));
+
+  const NOIMG_OA = '{"error":{"message":"Invalid content type. image_url is only supported by certain models.","type":"invalid_request_error","param":"messages.[1].content.[1].type","code":null}}';
+  useOpenAI({ openaiModel: 'gpt-3.5-turbo', openaiFallbackModel: 'gpt-4o-mini' });
+  calls = script(fail_(400, NOIMG_OA), orGood('{"answer":"B","index":1}'));
+  res = await ctx.ask(pic());
+  check('a model that takes no pictures hands on to the next, which gets the picture', res.index === 1 && res.model === 'gpt-4o-mini' && calls.length === 2 && hasPic(calls[1]) && !res.imageDropped, calls.map(c => c.body.model + (hasPic(c) ? '+pic' : '')).join(' → '));
+  useOpenAI({ openaiModel: 'gpt-3.5-turbo' });
+  calls = script(fail_(400, NOIMG_OA), orGood('{"answer":"B","index":1}'));
+  res = await ctx.ask(pic());
+  check('with one model: asked again without the picture, and marked', res.index === 1 && calls.length === 2 && !hasPic(calls[1]) && res.imageDropped === true);
+
+  store = { provider: 'openai', apiKey: 'sk-or-v1-something', geminiKey: KEY };
+  calls = script(orGood('{"answer":"B","index":1}'));
+  res = await ctx.ask(mcq());
+  check('another service\'s key does not stand in for an OpenAI one', !!res.error && /OpenAI API key/.test(res.error) && calls.length === 0, res.error);
+  store = { provider: 'openai', openaiKey: OKEY, openaiModel: '' };
+  calls = script(orGood('{"answer":"B","index":1}'));
+  res = await ctx.ask(mcq());
+  check('a model box saved empty means the default model', res.model === 'gpt-5-mini' && calls.length === 1 && calls[0].body.model === 'gpt-5-mini');
+
+  store = { apiKey: 'sk-or-v1-abc', openaiKey: OKEY };
+  calls = script(orGood('{"answer":"B","index":1}'));
+  await ctx.ask(mcq());
+  check('OpenRouter is unchanged: still max_tokens and a temperature, still its own address, never the OpenAI key', calls[0].url === 'https://openrouter.ai/api/v1/chat/completions' && calls[0].body.max_tokens === 1500 && calls[0].body.temperature === 0 && !('max_completion_tokens' in calls[0].body) && !calls[0].raw.includes(OKEY));
+
+  /* ------------------------------------- a page that takes only so many ticks */
+  // The live page took 2 ticks on a question with two right answers and ignored a third. The page script
+  // then asks again with maxPicks: the prompt must say so, and an answer over it must not be accepted.
+  console.log('\na page that takes only so many ticks');
+  const multiQ = extra => mcq({ multi: true, instruction: 'Select the correct answers.', options: [{ text: 'a' }, { text: 'b' }, { text: 'c' }, { text: 'd' }], ...extra });
+  const askText = ctx.buildText(multiQ({ maxPicks: 2 }));
+  check('the question tells the model how many ticks the page takes, and to give exactly that many', /=== LIMIT ===\s+The page accepts at most 2 ticked choices\. Give exactly 2/.test(askText), askText.replace(/\n/g, ' | ').slice(-200));
+  check('without a limit, no such line', !/LIMIT/.test(ctx.buildText(multiQ())));
+  const needText = ctx.buildText(multiQ({ minPicks: 2 }));
+  check('a page that keeps Submit off tells the model to give at least that many', /=== LIMIT ===\s+The page keeps Submit switched off until at least 2 choices are ticked\. Give at least 2/.test(needText), needText.replace(/\n/g, ' | ').slice(-220));
+  check('one answer where the page wants 2 is refused', ctx.parseMulti('{"answers":["B"],"indices":[1]}', 4, undefined, 2) === null);
+  check('two, or three, are accepted', j(ctx.parseMulti('{"answers":["B","D"],"indices":[1,3]}', 4, undefined, 2)?.indices) === '[1,3]' && j(ctx.parseMulti('{"answers":["A","B","D"],"indices":[0,1,3]}', 4, undefined, 2)?.indices) === '[0,1,3]');
+  check('with both a least and a most, only the range fits', ctx.parseMulti('{"indices":[1]}', 4, 3, 2) === null && ctx.parseMulti('{"indices":[0,1,2,3]}', 4, 3, 2) === null && j(ctx.parseMulti('{"indices":[1,2]}', 4, 3, 2)?.indices) === '[1,2]');
+  check('a single-answer question never gets one', !/LIMIT/.test(ctx.buildText(mcq({ maxPicks: 2 }))));
+  check('three answers where the page takes 2 are refused, not trimmed', ctx.parseMulti('{"answers":["A","B","D"],"indices":[0,1,3]}', 4, 2) === null);
+  check('two are accepted', j(ctx.parseMulti('{"answers":["B","D"],"indices":[1,3]}', 4, 2)?.indices) === '[1,3]');
+  check('one is accepted too (at most)', j(ctx.parseMulti('{"answers":["B"],"indices":[1]}', 4, 2)?.indices) === '[1]');
+  check('with no limit, three are fine as before', j(ctx.parseMulti('{"answers":["A","B","D"],"indices":[0,1,3]}', 4)?.indices) === '[0,1,3]');
+  useOpenAI();
+  calls = script(orGood('{"answers":["B","D"],"indices":[1,3]}'));
+  res = await ctx.ask(multiQ({ maxPicks: 2 }));
+  check('end to end: the limit is in what is sent, and the answer comes back', j(res.indices) === '[1,3]' && /at most 2 ticked/.test(calls[0].body.messages[1].content[0].text), j(res));
+  calls = script(orGood('{"answers":["A","B","D"],"indices":[0,1,3]}'));
+  res = await ctx.ask(multiQ({ maxPicks: 2 }));
+  check('end to end: an answer over the limit is an error, not a wrong answer put in', !!res.error && !res.indices, (res.error || '').slice(0, 120));
+
+  /* ----------------------------------------- a model that thinks itself out of room */
+  // From a real run: the model used its whole 4000-token budget thinking, three times over, and never wrote
+  // an answer. The retry now asks for LESS thinking as well as more room, and a second cut-off is not
+  // answered with yet another call in plain mode.
+  console.log('\na model that thinks itself out of room');
+  store = { apiKey: 'sk-or-v1-abc', model: 'm/thinker' };
+  calls = script(orLength, orGood('{"answer":"C","index":2}'));
+  res = await ctx.ask(mcq());
+  check('OpenRouter: the retry has more room AND switches extended thinking off', res.index === 2 && calls.length === 2 && calls[1].body.max_tokens === 4000 && j(calls[1].body.reasoning) === '{"enabled":false}', j(calls.map(c => ({ t: c.body.max_tokens, r: c.body.reasoning }))));
+  check('and tells the model to answer at once, in the question itself', /This is a retry/.test(calls[1].body.messages[1].content[0].text) && /Reply now with the JSON object only/.test(calls[1].body.messages[1].content[0].text) && /Which is right\?/.test(calls[1].body.messages[1].content[0].text));
+  check('the first call carries no such setting or note (a plain question is asked as before)', !('reasoning' in calls[0].body) && calls[0].body.max_tokens === 1500 && !/This is a retry/.test(calls[0].body.messages[1].content[0].text));
+
+  calls = script(orLength, fail_(400, '{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled","code":400}}'), orGood('{"answer":"B","index":1}'));
+  res = await ctx.ask(mcq());
+  check('a model that will not switch thinking off is asked for less of it instead', res.index === 1 && calls.length === 3 && j(calls[1].body.reasoning) === '{"enabled":false}' && j(calls[2].body.reasoning) === '{"effort":"low"}', j(calls.map(c => c.body.reasoning)));
+
+  calls = script(orLength, fail_(404, NOIMG), orGood('{"answer":"B","index":1}'));
+  res = await ctx.ask(pic());
+  check('a picture dropped after a cut-off does not undo the retry: still the larger budget, the note, and no thinking', res.index === 1 && res.imageDropped === true && calls.length === 3 && !hasPic(calls[2]) && calls[2].body.max_tokens === 4000 && /This is a retry/.test(calls[2].body.messages[1].content[0].text) && j(calls[2].body.reasoning) === '{"enabled":false}', j(calls.map(c => c.body.max_tokens)));
+
+  calls = script(orLength, orLength, orLength, orLength);
+  res = await ctx.ask(mcq());
+  check('cut off again after that: two calls, not three or four, and the error says why', calls.length === 2 && !!res.error && /finish_reason=length/.test(res.error) && /no extended thinking/.test(res.error), `calls=${calls.length}`);
+
+  store = { apiKey: 'sk-or-v1-abc', model: 'm/thinker', fallbackModel: 'm/quick' };
+  calls = script(orLength, orLength, orGood('{"answer":"A","index":0}'));
+  res = await ctx.ask(mcq());
+  check('with a fallback model, that is tried next', res.index === 0 && res.model === 'm/quick' && calls.length === 3 && calls[2].body.model === 'm/quick', calls.map(c => c.body.model).join(' → '));
+
+  useOpenAI({ openaiModel: 'gpt-5-mini' });
+  calls = script(orLength, orGood('{"answer":"C","index":2}'));
+  res = await ctx.ask(mcq());
+  check('OpenAI reasoning model: the retry has reasoning_effort low, and more room', calls.length === 2 && calls[1].body.reasoning_effort === 'low' && calls[1].body.max_completion_tokens === 4000 && !('reasoning_effort' in calls[0].body), j(calls.map(c => c.body.reasoning_effort)));
+  useOpenAI({ openaiModel: 'gpt-4.1-mini' });
+  calls = script(orLength, orGood('{"answer":"C","index":2}'));
+  res = await ctx.ask(mcq());
+  check('OpenAI model with no reasoning: never sent a setting it would refuse', calls.length === 2 && !('reasoning_effort' in calls[1].body) && calls[1].body.max_completion_tokens === 4000);
+
+  useGemini();
+  calls = script(gem('', { content: { role: 'model' }, finishReason: 'MAX_TOKENS' }), gem('{"answer":"B","index":1}'));
+  res = await ctx.ask(mcq());
+  check('Gemini: more room as before, and no setting of another service in the request', res.index === 1 && calls[1].body.generationConfig.maxOutputTokens === 4000 && !/reasoning/.test(calls[1].raw));
+
+  console.log('\na question whose page text holds no question');
+  const bareQ = ctx.buildText(multiQ({ stem: 'Select the correct answers.' }));
+  check('when the only "question" is the instruction itself, the model is told so', /=== QUESTION ===\s+\(The page's text holds no question, only the instruction below\. If a picture is attached, the question is in it\.\)/.test(bareQ), bareQ.replace(/\n/g, ' | ').slice(0, 220));
+  check('the instruction is still given, once, as the instruction', /=== INSTRUCTION ===\s+Select the correct answers\./.test(bareQ));
+  check('a real question is shown as it is', /=== QUESTION ===\s+What is it\?/.test(ctx.buildText(multiQ({ stem: 'What is it?' }))));
+  check('a single-answer question with no text keeps the old words', /=== QUESTION ===\s+\(no question text found\)/.test(ctx.buildText(mcq({ stem: '' }))));
+
   console.log(`\n${fail === 0 ? '✓ all' : '✗'} ${pass} passed, ${fail} failed\n`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch(e => { console.error('✗ harness error:', e && e.stack || e); process.exit(1); });
