@@ -1,0 +1,9 @@
+# A Chrome profile and scratch output from the test runs
+.chrome-profile/
+.tmp/
+node_modules/
+
+# An API key kept in a file for tools/solve.js, never to be committed
+.key.txt
+*.key
+.env

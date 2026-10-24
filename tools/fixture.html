@@ -1,0 +1,151 @@
+<!doctype html>
+<!-- Synthetic stand-in for a moe.alefed.com practice item. Built from the
+     structure visible in the real page: a passage block, a question stem, a
+     [role=radio] choice group, and a Submit that stays DISABLED until an
+     answer is selected. That last part is the interesting bit — it proves the
+     click sequence actually registers, not just that an element was found. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alef fixture — Skill Practice</title>
+<style>
+  body { font: 16px/1.6 Georgia, serif; margin: 0; background: #fff; color: #111; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 28px 20px 60px; }
+  .bar { display: flex; align-items: center; gap: 12px; margin-bottom: 26px; }
+  .bar .prog { flex: 1; height: 8px; border-radius: 4px; background: #e9edf5; overflow: hidden; }
+  .bar .prog i { display: block; height: 100%; width: 20%; background: #4d7cfe; }
+  .counter { color: #666; font: 13px/1 system-ui; }
+  .read-passage {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 7px 14px; border: 1px solid #d6dae3; border-radius: 8px;
+    background: #f7f8fa; font: 500 13px/1 system-ui; color: #333; cursor: pointer;
+    margin-bottom: 22px;
+  }
+  .passage { display: none; }
+  .passage.open { display: block; margin-bottom: 28px; }
+  .passage p { margin: 0 0 14px; }
+  .stem { font-weight: 700; font-size: 18px; line-height: 1.45; margin: 0 0 20px; }
+  .choices { display: flex; flex-direction: column; gap: 10px; margin-bottom: 26px; }
+  .choice {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 13px 15px; border: 1.5px solid #dde1e9; border-radius: 10px;
+    background: #fff; cursor: pointer; font: 15px/1.5 system-ui; text-align: left;
+  }
+  .choice:hover { border-color: #b9c3d6; }
+  .choice[data-state="checked"] { border-color: #4d7cfe; background: #eef3ff; }
+  .choice .mark {
+    flex: 0 0 20px; height: 20px; border: 2px solid #c8cedb; border-radius: 50%;
+    margin-top: 1px;
+  }
+  .choice[data-state="checked"] .mark { border-color: #4d7cfe; background: #4d7cfe; }
+  .submit {
+    padding: 12px 30px; border: 0; border-radius: 9px;
+    background: #4d7cfe; color: #fff; font: 600 15px/1 system-ui; cursor: pointer;
+  }
+  .submit[disabled] { background: #cdd4e0; cursor: not-allowed; }
+  .exit {
+    position: fixed; top: 60px; left: 12px; width: 190px;
+    border: 1px solid #e3e6ec; border-radius: 10px; padding: 10px;
+    font: 13px/1.4 system-ui; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.06);
+  }
+  .exit b { display: block; margin-bottom: 8px; font-size: 12px; color: #555; }
+  .exit span { display: block; padding: 7px 9px; border-radius: 7px; background: #f4f6f9; margin-bottom: 6px; }
+</style>
+</head>
+<body>
+
+<div class="exit">
+  <b>Sample Skill Practice</b>
+  <span>Sample Skill Practice ✓</span>
+  <span>Exit Ticket</span>
+</div>
+
+<div class="wrap">
+  <div class="bar">
+    <div class="prog"><i></i></div>
+    <div class="counter">1/5</div>
+  </div>
+
+  <button class="read-passage" id="readPassage">📄 Read Passage</button>
+
+  <div class="passage" id="passage">
+    <p>The old dock had not changed in the thirty years since I left it. The same
+    pilings, green with rot and salt, leaned into the water at the same angle. The
+    same smell — diesel, kelp, and something sweet and spoiled underneath — met me
+    at the end of the road, and for a moment I was seventeen again, hauling traps
+    beside my father while he whistled through the gap in his teeth.</p>
+
+    <p>But the boats were gone. Where a dozen trawlers had shouldered against each
+    other, there was only the flat grey water and a single abandoned skiff, its
+    hull stove in and its name sanded down to nothing. The cannery that had run
+    three shifts a day, that had lit the whole harbour until midnight, stood
+    hollow, its windows boarded with plywood the colour of wet cardboard.</p>
+
+    <p>My father would not have recognised it, and I found that I did not want him
+    to. The town had sold its boats, then its cannery, then its young people, in
+    that order, and had called each sale progress. Standing there, I understood
+    that I had not come home. I had come to a place that had been carefully,
+    deliberately emptied, and had been asked to call the emptiness a memory.</p>
+  </div>
+
+  <p class="stem">How does the author develop the central idea of the passage?</p>
+
+  <div class="choices" id="choices" role="radiogroup" aria-label="Answer choices">
+    <button class="choice" role="radio" aria-checked="false" data-state="unchecked" data-index="0">
+      <span class="mark"></span><span>by citing statistics about the town's economic decline</span>
+    </button>
+    <button class="choice" role="radio" aria-checked="false" data-state="unchecked" data-index="1">
+      <span class="mark"></span><span>by contrasting the narrator's nostalgic memories with the harbour's present emptiness</span>
+    </button>
+    <button class="choice" role="radio" aria-checked="false" data-state="unchecked" data-index="2">
+      <span class="mark"></span><span>by quoting an expert on the fishing industry</span>
+    </button>
+    <button class="choice" role="radio" aria-checked="false" data-state="unchecked" data-index="3">
+      <span class="mark"></span><span>by describing a single afternoon in chronological order</span>
+    </button>
+  </div>
+
+  <button class="submit" id="submit" disabled>Submit</button>
+</div>
+
+<script>
+  /* Behaviour modelled on the real widget: the choice is inert until clicked,
+   * Submit un-greys only once something is selected, and clicking Submit
+   * "submits" by recording the selection. The disabled-until-selected rule is
+   * what makes this a real test of the click sequence. */
+  const submit = document.getElementById('submit');
+  let chosen = null;
+
+  function select(choice) {
+    chosen = choice;
+    for (const c of document.querySelectorAll('.choice')) {
+      const on = c === choice;
+      c.dataset.state = on ? 'checked' : 'unchecked';
+      c.setAttribute('aria-checked', on ? 'true' : 'false');
+    }
+    submit.disabled = false;
+    window.__fixtureSelection = Number(choice.dataset.index);
+  }
+
+  for (const c of document.querySelectorAll('.choice')) {
+    // Deliberately listen on pointerdown, like Radix/HeadlessUI do. A bare
+    // .click() would NOT fire this — which is exactly the failure mode the
+    // realClick() helper exists to avoid.
+    c.addEventListener('pointerdown', e => { e.preventDefault(); select(c); });
+  }
+
+  document.getElementById('readPassage').addEventListener('click', () => {
+    document.getElementById('passage').classList.add('open');
+    document.getElementById('readPassage').style.display = 'none';
+  });
+
+  submit.addEventListener('click', () => {
+    if (submit.disabled) return;
+    window.__fixtureSubmitted = true;
+    window.__fixtureSubmittedAt = Date.now();
+    submit.disabled = true;
+    submit.textContent = 'Submitted';
+  });
+</script>
+</body>
+</html>

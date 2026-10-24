@@ -1,0 +1,184 @@
+<!doctype html>
+<!-- A drop-down question laid out as the live player does it: one template container holding the header
+     (Need Help?), the question widget and — inside the same container — the footer with Submit / Try
+     Again. The drop-downs are react-selects, as the live ones are: a visible control holding the value,
+     and beside the value a hidden <input role=combobox> (0x0). The control opens on mousedown, as
+     react-select's does; the menu sits beside the control; an option takes a click.
+
+     Default: a drop-down that has ALREADY been answered, wrongly, and is showing Try Again — what a run
+     lands on when it opens a lesson that was started before (the live dump: a react-select reading "5",
+     marked incorrect, "Oops!" and Try Again in the footer, a graph with a Zoom In button).
+
+     ?fresh=1   start unanswered, showing the placeholder instead (the ordinary state)
+     ?nomedia=1 no picture beside the question: nothing but text and the drop-down in it
+     ?two=1     the live "factored form" question: two drop-downs in two paragraphs, no picture,
+                unanswered. With so little text in the question, a search for the area around the
+                drop-downs grows until it takes in the whole player, footer and all.                  -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alef fixture — an answered drop-down</title>
+<style>
+  body { margin: 0; font: 16px system-ui; color: #1c2430; background: #fff; }
+  .wrap { margin: 40px 0 0 120px; width: 1000px; display: flex; gap: 30px; }
+  .lib-dropdown-container-wrapper { width: 602px; }
+  p { margin: 0 0 14px; line-height: 2.2; }
+  .lib-instruction-label { margin: 0 0 12px; font-size: 16px; color: #0a6a7a; }
+  .lib-dropdown-input-field-container { display: inline-block; vertical-align: middle; position: relative; }
+  .lib-Select__control { display: flex; align-items: center; min-width: 94px; height: 48px; box-sizing: border-box; border: 2px solid #c8ccd6; border-radius: 8px; cursor: pointer; padding: 0 8px; position: relative; }
+  .lib-is-incorrect .lib-Select__control { border-color: #e0525b; }
+  .lib-Select__value-container { display: flex; align-items: center; flex: 1; position: relative; }
+  .lib-Select__placeholder { color: #8b93a5; }
+  .lib-Select__single-value { font-weight: 600; }
+  .lib-Select__value-container input { width: 0; height: 0; border: 0; padding: 0; position: absolute; opacity: 0; }
+  .a11y { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .lib-Select__menu { position: absolute; top: 52px; left: 0; min-width: 94px; background: #fff; border: 1px solid #c8ccd6; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.15); z-index: 50; white-space: nowrap; }
+  .lib-Select__option { padding: 8px 14px; cursor: pointer; }
+  .lib-Select__option:hover { background: #eef2ff; }
+  .lib-media-container img { width: 401px; height: 301px; background: #eef; display: block; }
+  .lib-btn-img-zoom { width: 32px; height: 32px; }
+  aside { position: fixed; right: 6px; top: 70px; width: 150px; z-index: 5; font-size: 12px; }
+  .lib-navigation-container { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 24px; background: #fff; border-top: 2px solid #e6e9ef; }
+  .lib-navigation-buttons { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+  .lib-feedback-container { flex: 1; display: flex; align-items: center; gap: 10px; background: #fde8ea; padding: 8px 14px; border-radius: 8px; }
+  .lib-navigation-container button, .lib-show-video-need-help-container button { padding: 10px 22px; border-radius: 8px; border: 1px solid #c8ccd6; font: 600 15px system-ui; background: #2f6bff; color: #fff; }
+  .lib-navigation-container button[data-testid=navigation-secondary] { background: #fff; color: #1c2430; }
+  .lib-navigation-container button:disabled { opacity: .4; }
+  .lib-show-video-need-help-container { text-align: right; padding: 8px 90px; }
+  .lib-show-video-need-help-container button { background: #fff7d6; color: #1c2430; padding: 4px 12px; }
+</style>
+</head>
+<body>
+<aside><nav><button id="side" style="width:100%;padding:8px">Check My Understanding</button></nav></aside>
+
+<div id="template-container" class="lib-template-container lib-vw-desktop lib-responsive-fluid"><div class="lib-template-container-wrapper-with-breakpoint lib-template-container-wrapper">
+<div id="unified-widget-header-section" class="lib-widget-header-section-container"><div class="lib-widget-header-section"><div class="lib-show-video-need-help-container"><button aria-label="Need Help?" data-testid="need-help-button" type="button">Need Help?</button></div></div></div>
+<div class="lib-dropdown-container lib-dropdownSentence lib-question-widget"><div class="lib-dropdown-field-container" data-testid="dropdown-field-conta">
+  <div class="wrap">
+    <div class="lib-dropdown-box-field-wrapper lib-dropdown-content-wrapper" data-testid="dropdown-box-field-w">
+      <div class="lib-question-statement-container"></div>
+      <h3 id="question-instruction" class="lib-instruction-label" data-testid="question-instruction">Choose the correct option from the drop-down list.</h3>
+      <div class="lib-dropdown-container-wrapper"><div class="lib-dropdown-fields-wrapper"><span><div id="sentence" class="lib-dropdown-sentence-container"></div></span></div></div>
+    </div>
+    <div class="lib-media-container"><div class="lib-image-container"><div class="lib-image-widget-wrapper" data-testid="image-container">
+      <img class="lib-image-widget" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='401' height='301'%3E%3Cpath d='M0 250 Q100 0 200 150 T400 100' stroke='crimson' fill='none'/%3E%3C/svg%3E">
+      <button class="lib-btn-img-zoom" aria-label="Zoom In" data-testid="image-zoom-in-button" type="button">🔍</button>
+    </div></div></div>
+  </div>
+</div></div>
+</div>
+
+<div id="widgets-navigation-container" class="lib-navigation-container" data-testid="navigation-container"><div class="lib-navigation-buttons" data-testid="navigation-buttons">
+  <div class="lib-secondary-button-wrapper"><button data-testid="navigation-secondary" type="button">Go Back</button></div>
+  <div id="feedback-slot" style="flex:1"></div>
+  <div class="lib-navigation-next-skip-wrapper"><button id="main" class="lib-btn-next" data-testid="navigation-next-butt" type="button"></button></div>
+</div></div>
+</div>
+
+<script>
+  const Q = new URLSearchParams(location.search);
+  const TWO = Q.has('two');
+  const FRESH = Q.has('fresh') || TWO;
+  if (Q.has('nomedia') || TWO) document.querySelector('.lib-media-container').remove();
+  if (TWO) {
+    // The live widget has no flex wrapper between the field container and the box; match its depth.
+    const w = document.querySelector('.wrap');
+    w.parentElement.style.margin = '40px 0 0 120px';
+    w.replaceWith(...w.childNodes);
+  }
+
+  const SLOTS = TWO
+    ? [{ options: ['(x − 1)(2x − 3) = 0', '(x + 1)(2x − 3) = 0', '(x − 1)(2x + 3) = 0'], right: '(x − 1)(2x − 3) = 0' },
+       { options: ['1 and 3/2', '−1 and 3/2', '1 and −3/2'], right: '1 and 3/2' }]
+    : [{ options: ['2', '3', '4', '5', '6'], right: '4' }];
+
+  // The sentence, in two paragraphs as on the live page.
+  const sentence = document.getElementById('sentence');
+  sentence.innerHTML = TWO
+    ? '<p>The factored form of 2x² − 2x − 3x + 3 = 0 is <span id="slot0"></span>.</p><p>The roots for this equation are <span id="slot1"></span>.</p>'
+    : '<p>Determine the number of zeros for the function shown on this graph.</p><p>The function has <span id="slot0"></span> real zeros.</p>';
+
+  const values = SLOTS.map(() => null);
+  if (!FRESH) values[0] = '5';
+  const sync = () => { window.__value = values[0]; window.__values = values.slice(); };
+  window.__retryClicks = 0; window.__submitClicks = 0; window.__graded = null;     // 'wrong' | 'right'
+  sync();
+  let menu = null;
+  let state = FRESH ? 'asking' : 'wrong';    // asking | wrong | right
+
+  const main = document.getElementById('main');
+  const feedback = document.getElementById('feedback-slot');
+
+  // Each control is built once and then updated where it stands, as React does: anything holding
+  // the element keeps holding the live one.
+  SLOTS.forEach((slot, i) => {
+    document.getElementById('slot' + i).innerHTML = `
+      <div class="lib-dropdown-input-field-container" data-testid="dropdown-${i + 1}">
+        <div class="lib-dropdown-field-wrapper lib-dropdown-input-field-wrapper lib-default">
+          <span id="react-select-${i + 3}-live-region" class="a11y"></span><span class="a11y" role="log"></span>
+          <div class="lib-default lib-Select__control lib-default">
+            <div class="lib-default lib-Select__value-container lib-default"><span class="val"></span>
+              <input id="react-select-${i + 3}-input" role="combobox" aria-label="Select an option" tabindex="0" readonly>
+            </div>
+            <div class="lib-Select__indicators"></div>
+          </div>
+        </div>
+      </div>`;
+    const control = document.getElementById('slot' + i).querySelector('.lib-Select__control');
+    // react-select opens on mousedown (left button) and ignores a plain click on the control
+    control.addEventListener('mousedown', e => { if (e.button === 0 && state !== 'wrong') toggleMenu(i, control); });
+  });
+
+  function render() {
+    SLOTS.forEach((slot, i) => {
+      const v = values[i];
+      const host = document.getElementById('slot' + i);
+      const box = host.querySelector('.lib-dropdown-input-field-container');
+      box.classList.toggle('lib-is-selected', !!v);
+      box.classList.toggle('lib-is-incorrect', state === 'wrong');
+      host.querySelector('.val').innerHTML = v
+        ? `<div class="lib-dropdown-single-value lib-default lib-Select__single-value"><div class="lib-dropdown-single-value-content"><span class="lib-html-container lib-html-text"><span><span class="lib-html-text-wrapper">${v}</span></span></span></div></div>`
+        : '<div class="lib-Select__placeholder">Select…</div>';
+      host.querySelector('.lib-Select__indicators').innerHTML = state === 'wrong' ? '<img class="lib-option-icon lib-option-incorrect-icon" alt="" width="14" height="14">' : '';
+    });
+    feedback.innerHTML = state === 'wrong'
+      ? '<div class="lib-feedback-container lib-incorrect" data-testid="DEFAULT-question-fee"><img alt="" width="34" height="34"><div class="lib-feedback-content-container"><span class="lib-html-container lib-html-text"><span><span class="lib-html-text-wrapper">Oops!</span></span></span></div></div>' : '';
+    main.textContent = state === 'wrong' ? 'Try Again' : state === 'right' ? 'Next' : 'Submit Answer';
+    main.disabled = state === 'asking' && values.some(v => !v);
+    main.type = state === 'asking' ? 'submit' : 'button';
+    sync();
+  }
+
+  function toggleMenu(i, control) {
+    const same = menu && menu.i === i;
+    if (menu) { menu.el.remove(); menu = null; }
+    if (same) return;
+    const el = document.createElement('div');
+    el.className = 'lib-Select__menu';
+    el.innerHTML = '<div class="lib-Select__menu-list">' + SLOTS[i].options.map((o, k) =>
+      `<div class="lib-Select__option" role="option" id="react-select-${i + 3}-option-${k}">${o}</div>`).join('') + '</div>';
+    // As in react-select, the menu sits beside the control (not in it), and a press on it never
+    // reaches the control's own handler.
+    el.addEventListener('mousedown', e => e.stopPropagation());
+    for (const o of el.querySelectorAll('.lib-Select__option')) {
+      o.addEventListener('click', () => { values[i] = o.textContent; if (menu) { menu.el.remove(); menu = null; } render(); });
+    }
+    control.parentElement.parentElement.appendChild(el);
+    menu = { i, el };
+  }
+
+  main.addEventListener('click', () => {
+    if (main.disabled) return;
+    if (state === 'wrong') { window.__retryClicks++; values.fill(null); state = 'asking'; render(); return; }
+    if (state === 'asking') {
+      window.__submitClicks++;
+      window.__graded = values.every((v, i) => v === SLOTS[i].right) ? 'right' : 'wrong';
+      state = window.__graded;
+      render();
+    }
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && menu) { menu.el.remove(); menu = null; } });
+  render();
+</script>
+</body>
+</html>

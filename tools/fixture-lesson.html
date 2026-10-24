@@ -1,0 +1,629 @@
+<!doctype html>
+<!-- A full lesson: several questions sharing ONE passage behind a Read Passage
+     button, a per-question Submit that grades, and a Next that advances — with
+     Next ABSENT on the last question. That's the shape the run loop has to
+     handle: reuse the passage, submit, advance, and stop when questions run out.
+
+     The URL keeps a /lesson/<id> segment so lessonKey() has something real. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alef fixture — lesson</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; margin: 0; background: #fff; color: #111; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 32px 28px 90px; }
+  .bar { height: 8px; background: #e9edf5; border-radius: 4px; margin-bottom: 22px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: #4d7cfe; transition: width .3s; }
+  .read-passage {
+    display: inline-flex; gap: 8px; padding: 7px 14px; border: 1px solid #d6dae3;
+    border-radius: 8px; background: #f7f8fa; font: 500 13px/1 system-ui;
+    cursor: pointer; margin-bottom: 18px;
+  }
+  .passage { display: none; }
+  .passage.open { display: block; max-width: 700px; margin-bottom: 22px;
+    border: 1px solid #e3e6ec; border-radius: 8px; padding: 14px 18px; background: #fafbfc; }
+  .stem { font-weight: 700; font-size: 17px; margin: 0 0 6px; max-width: 620px; }
+  .prompt { color: #2a6fd6; font-weight: 600; font-size: 14px; margin: 0 0 16px; }
+  .grid { display: grid; grid-template-columns: 108px 1fr 108px 1fr; gap: 14px; max-width: 880px; }
+  .cell { border: 1px solid #d8dce4; border-radius: 4px; background: #fff;
+    display: flex; align-items: center; padding: 14px 16px; font: 14px/1.5 system-ui; }
+  .cell.radio { justify-content: center; cursor: pointer; }
+  .row.correct .cell.text, .row.correct .cell.radio { border-color: #2fa96b; background: #edf9f2; }
+  .row.wrong   .cell.text, .row.wrong   .cell.radio { border-color: #d64545; background: #fdeeee; }
+  input[type=radio] { width: 18px; height: 18px; accent-color: #2a6fd6; }
+  .foot { position: fixed; bottom: 0; left: 0; right: 0; padding: 14px 28px;
+    background: #fff; border-top: 1px solid #e6e9ef; display: flex; gap: 10px;
+    align-items: center; justify-content: flex-end; }
+  .status { margin-right: auto; font: 600 14px/1 system-ui; }
+  .status.ok { color: #2fa96b; } .status.bad { color: #d64545; }
+  button.go { padding: 11px 26px; border: 0; border-radius: 6px; background: #2a6fd6;
+    color: #fff; font: 600 14px/1 system-ui; cursor: pointer; }
+  button.go[disabled] { background: #c8cfda; cursor: not-allowed; }
+  button.next { background: #eef3ff; color: #2a6fd6; }
+</style>
+</head>
+<body>
+<!-- The live lesson has a sidebar with an always-enabled "Check My Understanding"
+     button, before the question in the DOM. It must never be mistaken for Submit. -->
+<aside style="position:fixed; right:6px; top:70px; width:150px; z-index:5"><nav>
+  <button id="side" style="width:100%; padding:8px">Check My Understanding</button>
+</nav></aside>
+<script>window.__sideClicks = 0; document.getElementById('side').addEventListener('click', () => window.__sideClicks++);</script>
+<!-- &chrome=1: the live site's own header, with the profile menu that has "Select Language" in it
+     (which a drop-down detector once read as a question and clicked). Any click in it is counted. -->
+<div id="sitechrome" style="display:none; padding:8px 12px; border-bottom:1px solid #ccc">
+  <div id="navigation_profile" class="profile" style="display:inline-block">
+    <div class="profile__button" style="cursor:pointer"><span>Sample Student</span></div>
+    <div class="profile__dropdown" style="padding:6px; border:1px solid #ddd; margin-top:4px">
+      <div class="profile__list">
+        <div id="select-language-button" class="profile__dropdown-item with-language" style="cursor:pointer">
+          <div class="profile__language">Select Language</div>
+          <div class="profile__language-selection">English</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+  window.__chromeClicks = 0;
+  document.getElementById('sitechrome').addEventListener('click', () => window.__chromeClicks++, true);
+  if (new URLSearchParams(location.search).get('chrome') === '1') document.getElementById('sitechrome').style.display = '';
+</script>
+<div class="wrap">
+  <div class="bar"><i id="prog"></i></div>
+  <button class="read-passage" id="readPassage">📄 Read Passage</button>
+  <div class="passage" id="passage">
+    <p>Automation did not arrive in the warehouse all at once. The company first
+    introduced handheld scanners, then conveyor sorting, then robots that could
+    lift a pallet without being told where to put it. Each step was announced as
+    relief from drudgery, and each step did remove some — while quietly moving
+    the judgement to the machine and the remaining worker to the machine's errors.</p>
+    <p>Globalisation pulled the other way. Cheap freight let the company move a
+    distribution centre overseas, and it did, then brought it back when freight
+    stopped being cheap. Through both moves, the people who had learned the
+    scanners and the conveyor and the robots kept their jobs, because they were
+    the only ones who could tell when the system was wrong.</p>
+  </div>
+
+  <!-- ?slides=N: N content screens before the first question — text and a picture to explore,
+       with hotspot buttons and a Next that is already enabled — as on the live site.
+       &ghost=1 makes them look like a question this page cannot read: a Submit that is
+       disabled until something is done. -->
+  <div id="slide" style="display:none">
+    <p id="slidetext">Explore how rising, falling, and level intonation can change how a speaker's message sounds.</p>
+    <div id="hotspots"><button class="hs">+</button> <button class="hs">+</button> <button class="hs">+</button></div>
+  </div>
+  <!-- ?splash=start: every lesson opens on a title screen with a Start in the player's footer bar
+       (as on the live site's "Writing: …" activities); ?splash=mid: one comes after the first
+       question — the live case, where Next led to the next activity's title screen. -->
+  <div id="splash" style="display:none">
+    <h2>Writing: A Sample Topic</h2>
+    <div id="widgets-navigation-container" class="lib-navigation-container" data-testid="navigation-container">
+      <div class="lib-navigation-next-skip-wrapper">
+        <button class="go lib-btn-next" id="splashstart" data-testid="navigation-next-butt"><span>Start</span></button>
+      </div>
+    </div>
+  </div>
+  <p class="stem" id="stem"></p>
+  <p class="prompt">Select the correct answer.</p>
+  <div class="grid" id="grid"></div>
+  <!-- ?course=N: what follows the last question's Done, for a lesson run that goes on to
+       the next lesson. -->
+  <div id="end" style="display:none">
+    <p id="endmsg" style="font-weight:700"></p>
+    <button class="go" id="cont" style="display:none">Continue</button>
+    <button class="go" id="nextlesson" style="display:none">Next Lesson</button>
+    <button class="go" id="back" style="display:none">Back to Coursework</button>
+    <!-- &end=results: the live site's way out, in the order the person gave it — Done on the
+         last question → the results page with its own "Finish" (and no way back yet) → a
+         "Submit" → "Back to Coursework". &under=1 leaves the results page's Finish showing
+         under the Submit (a dialog on top of the page rather than a page in its place);
+         &submitlag=N holds Submit greyed out for N ms. -->
+    <div id="results" style="display:none; margin-top:18px">
+      <p>Exit Ticket 80 % 2/2 <button class="rv">Review</button></p>
+      <button class="go" id="resfinish">Finish</button>
+      <div id="resdialog" role="dialog" style="display:none; margin-top:12px; padding:14px; border:1px solid #bbb; border-radius:10px">
+        <p>Submit your exit ticket?</p>
+        <button class="go" id="ressubmit" style="border-radius:20px">Submit</button>
+      </div>
+      <!-- &rate=1 (or need): Finish opens the live site's "Rate your lesson!" box instead. Its Cancel
+           and Submit are styled boxes here (the live page's report showed no <button> for them;
+           &ratebtn=1 makes them real buttons); the text area's placeholder is "Submit"; and Back to
+           Coursework is already showing behind it. &rate=need: Submit does nothing until a smiley
+           has been chosen. &ratenow=1: the page opens on the box. -->
+      <div id="ratebox" style="display:none; margin-top:12px; padding:14px; border:1px solid #bbb; border-radius:10px; width:320px">
+        <div style="font-weight:700; margin-bottom:8px">Rate your lesson!</div>
+        <div id="smileys" style="margin-bottom:8px">
+          <div class="sm" style="display:inline-block; width:28px; height:28px; border-radius:50%; background:#d33; cursor:pointer; margin-right:8px"></div><div class="sm" style="display:inline-block; width:28px; height:28px; border-radius:50%; background:#e92; cursor:pointer; margin-right:8px"></div><div class="sm" style="display:inline-block; width:28px; height:28px; border-radius:50%; background:#2b2; cursor:pointer"></div>
+        </div>
+        <textarea id="ratetext" placeholder="Submit" rows="3" style="width:100%; box-sizing:border-box"></textarea>
+        <div id="ratemsg" style="color:#b00"></div>
+        <div style="margin-top:8px; text-align:right">
+          <div id="ratecancel" style="display:inline-block; cursor:pointer; padding:6px 14px; background:#eee; border-radius:16px; margin-right:6px"><span>Cancel</span></div><div id="ratesubmit" style="display:inline-block; cursor:pointer; padding:6px 16px; background:#1db5a5; color:#fff; border-radius:16px"><span>Submit</span></div>
+        </div>
+      </div>
+    </div>
+    <!-- &end=attempts: what the live site shows right after Finish — the lesson's results, with a card
+         per attempt. The 2nd and 3rd each have a Start for ANOTHER GO AT THIS LESSON, which is not
+         the next lesson; "Back to Coursework" appears a moment later, once the scores have loaded. -->
+    <div id="attempts" style="display:none; margin-top:18px">
+      <div style="display:flex; gap:16px">
+        <div class="acard"><b>1st Attempt</b><br><span>80%</span> <button class="rv">Review</button></div>
+        <div class="acard"><b>2nd Attempt</b><br><button class="astart">Start</button></div>
+        <div class="acard"><b>3rd Attempt</b><br><button class="astart" disabled>Start</button></div>
+      </div>
+    </div>
+  </div>
+  <!-- &end=real: the coursework page the live site returns to. Lessons not begun say Start
+       (&begun=1: Continue). -->
+  <div id="home" style="display:none">
+    <h3>Latest Assigned Tasks</h3>
+    <div id="tasks"></div>
+  </div>
+</div>
+
+<div class="foot">
+  <div class="status" id="status"></div>
+  <button class="go next" id="later" style="display:none; background:none; color:#555">I'll try later</button>
+  <button class="go" id="submit" disabled>Submit</button>
+  <button class="go next" id="next" style="display:none">Next ›</button>
+  <button class="go" id="done" style="display:none">Done ›</button>
+  <button class="go" id="retry" style="display:none">Try Again</button>
+</div>
+
+<script>
+  /* Three questions over one passage. The correct choice varies per question so
+     a solver that always clicks the first option fails loudly. Next is absent
+     on the final question, which is how the run loop knows to stop. */
+  const QUESTIONS = [
+    {
+      stem: 'How does the author develop the central idea throughout the passage?',
+      options: [
+        'by listing statistics about automation and globalisation',
+        'by contrasting technological change with globalisation and their effects on workers',
+        'by quoting an expert on warehouse automation',
+        'by describing a single afternoon in a distribution centre',
+      ],
+      correct: 1,
+    },
+    {
+      stem: 'How effectively does the author acknowledge and address opposing viewpoints?',
+      options: [
+        "It presents Ortiz's and Chen's views as completely contradictory arguments.",
+        "It focuses mainly on Chen's concerns and provides little support for Ortiz's position.",
+        'It presents both perspectives, showing that workforce changes create opportunities and risks.',
+        "It presents Ortiz's view and then dismisses Chen's concerns as unsupported.",
+      ],
+      correct: 2,
+    },
+    {
+      stem: 'What is the main purpose of the second paragraph?',
+      options: [
+        'to introduce a counterpoint and show why it did not change the outcome',
+        'to restate the first paragraph in simpler terms',
+        'to argue that globalisation is more important than automation',
+        'to describe the company\'s overseas distribution centre in detail',
+      ],
+      correct: 0,
+    },
+  ];
+
+  const MODE = new URLSearchParams(location.search).get('retry');
+  const RETRY = MODE === '1' || MODE === 'both';
+  const BOTH = MODE === 'both';
+
+  // ?course=3 makes this one of three lessons in a row (the URL says which, as the
+  // live one does). &end= is what follows the last question's Done:
+  //   next    a "Next Lesson" button          ar     the same button, in Arabic
+  //   modal   a "Continue" first, then it     auto   the next lesson starts by itself
+  //   dead    a "Next Lesson" button that does nothing
+  //   real    as on the live site: the last button says "Finish", then "Back to
+  //           Coursework", then a coursework page with a Start beside each lesson
+  const COURSE = Number(new URLSearchParams(location.search).get('course') || 0);
+  const END = new URLSearchParams(location.search).get('end') || 'next';
+  let lessonNo = 1;
+  window.__nextLessonClicks = 0;
+  window.__contClicks = 0;
+  // The address is shaped like the live one, with the lesson's own id in it ("…/lesson/<uuid>/…"):
+  // that is how a lesson already done is told from a new one. Opening a lesson from the list
+  // pushes a history entry, as a route change does on the live site.
+  const lessonUrl = n => '#/progress/ncle/class/c1/lesson/aaaaaaaa-0000-4000-8000-' + String(n).padStart(12, '0') + '/material/m/normal';
+  const LIST_URL = '#/classes/c1?tab=forYou';
+  const markLesson = push => { if (COURSE) history[push ? 'pushState' : 'replaceState'](null, '', location.pathname + location.search + lessonUrl(lessonNo)); };
+  let q = 0;
+  let submittedCurrent = false;
+  window.__wrongs = 0;
+  window.__lessonSubmissions = [];   // indices chosen, in order
+  window.__advanced = 0;
+
+  const el = id => document.getElementById(id);
+
+  // ?listen=1,3: those questions (counting from 1) start "Listen." and — like the live listening
+  // questions — offer "I'll try later" beside Submit. &later=all: every question offers it.
+  // &noskip=1: the Listen questions do not. Skipping just moves on; the question is not graded
+  // and does not come back.
+  const PARAMS = new URLSearchParams(location.search);
+  const LISTEN = (PARAMS.get('listen') || '').split(',').filter(Boolean).map(n => Number(n) - 1);
+  // &later=all: every question offers it; &later=2,3: those (counting from 1) do.
+  const LATER_ALL = PARAMS.get('later') === 'all';
+  const LATER_LIST = (PARAMS.get('later') || '').split(',').filter(n => /^\d+$/.test(n)).map(n => Number(n) - 1);
+  const NOSKIP = PARAMS.get('noskip') === '1';
+  // &plain=2: those questions draw their options as plain boxes with nothing to select them by,
+  // like a question type this script cannot read (multiple answers, in the live case).
+  const PLAIN = (PARAMS.get('plain') || '').split(',').filter(Boolean).map(n => Number(n) - 1);
+  window.__skips = 0;
+
+  const SLIDES = Number(new URLSearchParams(location.search).get('slides') || 0);
+  const GHOST = new URLSearchParams(location.search).get('ghost') === '1';
+  const TAIL = new URLSearchParams(location.search).get('tail') === '1';     // a closing screen after the last question
+  // &lock=N: a slide's Next is greyed out for N ms after it appears (narration, an animation);
+  // &lock=-1: for good. &slideafter=1: the slides come after the first question, not before it.
+  const LOCK = Number(new URLSearchParams(location.search).get('lock') || 0);
+  const SLIDE_AFTER = new URLSearchParams(location.search).get('slideafter') === '1';
+  let slidesLeft = SLIDE_AFTER ? 0 : SLIDES;
+  let slidesShown = false, unlockTimer = null;
+  window.__slidesSkipped = 0;
+
+  // The closing screen: no question, no Next — only the button that ends the lesson.
+  function renderTail() {
+    for (const id of ['stem', 'grid']) el(id).style.display = 'none';
+    document.querySelector('.prompt').style.display = 'none';
+    el('slidetext').textContent = 'Well done. You have reached the end of this lesson.';
+    el('hotspots').style.display = 'none';
+    el('slide').style.display = '';
+    el('submit').style.display = 'none';
+    el('next').style.display = 'none';
+    el('status').textContent = '';
+    el('done').style.display = '';
+  }
+
+  function renderSlide() {
+    // Each slide differs from the one before (the live ones have their own picture and text).
+    el('slidetext').textContent = `Explore how rising, falling, and level intonation can change how a speaker's message sounds. (screen ${SLIDES - slidesLeft + 1} of ${SLIDES})`;
+    for (const id of ['stem', 'grid']) el(id).style.display = 'none';
+    document.querySelector('.prompt').style.display = 'none';
+    el('slide').style.display = '';
+    el('later').style.display = 'none';
+    el('submit').style.display = GHOST ? '' : 'none';
+    el('submit').disabled = true;
+    el('done').style.display = 'none';
+    el('retry').style.display = 'none';
+    el('next').style.display = '';
+    el('next').disabled = LOCK !== 0;
+    clearTimeout(unlockTimer);
+    if (LOCK > 0) unlockTimer = setTimeout(() => { el('next').disabled = false; }, LOCK);
+    el('status').textContent = '';
+  }
+
+  const SPLASH = new URLSearchParams(location.search).get('splash') || '';
+  let splashPending = SPLASH === 'start';
+  window.__splashStarts = 0;
+  function renderSplash() {
+    for (const id of ['stem', 'grid', 'slide', 'submit', 'later', 'next', 'done', 'retry']) el(id).style.display = 'none';
+    document.querySelector('.prompt').style.display = 'none';
+    el('splash').style.display = '';
+    el('status').textContent = '';
+  }
+  el('splashstart').addEventListener('click', () => {
+    window.__splashStarts++;
+    splashPending = false;
+    el('splash').style.display = 'none';
+    render();
+  });
+
+  function render() {
+    if (splashPending) { renderSplash(); return; }
+    if (slidesLeft > 0) { renderSlide(); return; }
+    clearTimeout(unlockTimer);
+    el('next').disabled = false;
+    el('slide').style.display = 'none';
+    for (const id of ['stem', 'grid']) el(id).style.display = '';
+    document.querySelector('.prompt').style.display = '';
+    submittedCurrent = false;
+    const item = QUESTIONS[q];
+    const listening = LISTEN.includes(q);
+    el('stem').textContent = (COURSE ? `Lesson ${lessonNo}: ` : '') + (listening ? 'Listen. ' : '') + item.stem;
+    el('later').style.display = (LATER_ALL || LATER_LIST.includes(q) || (listening && !NOSKIP)) ? '' : 'none';
+    el('prog').style.width = `${((q + 1) / QUESTIONS.length) * 100}%`;
+
+    const grid = el('grid');
+    grid.innerHTML = '';
+    item.options.forEach((text, i) => {
+      if (PLAIN.includes(q)) {
+        const box = document.createElement('div');
+        box.className = 'cell text';
+        box.style.cssText = 'grid-column: span 2; cursor: pointer';
+        box.textContent = text;
+        grid.appendChild(box);
+        return;
+      }
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.style.display = 'contents';
+
+      const rc = document.createElement('label');
+      rc.className = 'cell radio';
+      const input = document.createElement('input');
+      input.type = 'radio';
+      input.name = 'q';
+      input.value = String(i);
+      input.addEventListener('change', () => { el('submit').disabled = false; });
+      rc.appendChild(input);
+
+      const tc = document.createElement('div');
+      tc.className = 'cell text';
+      tc.textContent = text;
+
+      grid.appendChild(rc);
+      grid.appendChild(tc);
+      row.dataset.index = String(i);
+      // tag the two cells so grading can find them
+      rc.dataset.qIndex = String(i);
+      tc.dataset.qIndex = String(i);
+      rc._row = tc._row = row;
+    });
+
+    el('submit').disabled = true;
+    el('submit').style.display = '';
+    el('submit').textContent = 'Submit';
+    el('next').style.display = 'none';
+    el('done').style.display = 'none';
+    el('retry').style.display = 'none';
+    el('status').textContent = '';
+    el('status').className = 'status';
+  }
+
+  el('submit').addEventListener('click', () => {
+    if (el('submit').disabled) return;
+    const chosen = document.querySelector('input[name=q]:checked');
+    const idx = chosen ? Number(chosen.value) : -1;
+    window.__lessonSubmissions.push(idx);
+    submittedCurrent = true;
+
+    const item = QUESTIONS[q];
+    // mark the cells
+    for (const c of document.querySelectorAll('[data-q-index]')) {
+      const i = Number(c.dataset.qIndex);
+      const parentRow = c.parentElement === document.getElementById('grid')
+        ? c : c.closest('.row');
+      if (i === idx) c.classList.add('chosen');
+    }
+    const rows = document.getElementById('grid').querySelectorAll('[data-q-index]');
+    for (const c of rows) {
+      if (Number(c.dataset.qIndex) === item.correct) c.classList.add('correct');
+      if (Number(c.dataset.qIndex) === idx && idx !== item.correct) c.classList.add('wrong');
+    }
+
+    const right = idx === item.correct;
+    el('status').textContent = right ? 'Correct' : 'Incorrect';
+    el('status').className = 'status ' + (right ? 'ok' : 'bad');
+    el('submit').style.display = 'none';
+
+    // ?retry=1 is how the live page behaves on a wrong answer: no Next, only a
+    // "Try Again" that gives the question back. A right answer moves on as usual.
+    // ?retry=both offers Next as well — the answer is still wrong, so moving on
+    // would leave the question failed.
+    if (RETRY && !right) {
+      el('retry').style.display = '';
+      window.__wrongs++;
+      if (!BOTH) return;
+    }
+
+    // Next appears only if there is a next question. (&tail=1: or a closing screen.)
+    if (q < QUESTIONS.length - 1 || TAIL) el('next').style.display = '';
+    // The last question ends with "Done", as on the live page — not "Next".
+    else el('done').style.display = '';
+    window.__fixtureSubmitted = true;
+  });
+
+  el('later').addEventListener('click', () => {
+    window.__skips++;
+    // Skipping moves on without grading; the last one ends the lesson the way a Next-less answer does.
+    if (q < QUESTIONS.length - 1) { q++; render(); return; }
+    submittedCurrent = true;
+    el('submit').style.display = 'none'; el('later').style.display = 'none';
+    el('done').style.display = '';
+  });
+
+  window.__doneClicks = 0;
+  el('done').addEventListener('click', () => { window.__doneClicks++; if (COURSE) finishLesson(); });
+
+  const QUESTION_UI = ['stem', 'grid'];
+  function finishLesson() {
+    el('slide').style.display = 'none';
+    for (const id of QUESTION_UI) el(id).style.display = 'none';
+    document.querySelector('.prompt').style.display = 'none';
+    el('passage').classList.remove('open');
+    el('readPassage').style.display = 'none';
+    el('done').style.display = 'none';
+    el('prog').style.width = '100%';
+    const more = lessonNo < COURSE;
+    el('end').style.display = '';
+    el('endmsg').textContent = more ? `Lesson ${lessonNo} complete` : 'All lessons complete';
+    if (END === 'results') { el('results').style.display = ''; return; }    // Back comes only after Finish and Submit
+    if (END === 'attempts') {
+      el('attempts').style.display = '';
+      setTimeout(() => { el('back').style.display = ''; }, 1200);          // the scores load first
+      return;
+    }
+    if (END === 'real') { el('back').style.display = ''; return; }          // even after the last lesson
+    if (!more) return;
+    if (END === 'auto') { setTimeout(startLesson, 400, lessonNo + 1); return; }
+    const next = el('nextlesson');
+    next.textContent = END === 'ar' ? 'الدرس التالي' : 'Next Lesson';
+    if (END === 'modal') el('cont').style.display = ''; else next.style.display = '';
+  }
+  function startLesson(n, push) {
+    lessonNo = n; q = 0;
+    slidesLeft = SLIDE_AFTER ? 0 : SLIDES; slidesShown = false;       // ?slides=N: every lesson opens on its slides
+    splashPending = SPLASH === 'start';
+    el('splash').style.display = 'none';
+    el('hotspots').style.display = '';
+    el('slidetext').textContent = 'Explore how rising, falling, and level intonation can change how a speaker\'s message sounds.';
+    for (const id of QUESTION_UI) el(id).style.display = '';
+    document.querySelector('.prompt').style.display = '';
+    el('end').style.display = 'none';
+    el('attempts').style.display = 'none';
+    el('results').style.display = 'none';
+    el('resfinish').style.display = '';
+    el('resdialog').style.display = 'none';
+    el('ratebox').style.display = 'none';
+    smileyChosen = false;
+    el('ratemsg').textContent = '';
+    el('home').style.display = 'none';
+    el('cont').style.display = 'none';
+    el('nextlesson').style.display = 'none';
+    el('back').style.display = 'none';
+    el('readPassage').style.display = '';
+    markLesson(push);
+    render();
+  }
+
+  window.__resFinish = 0; window.__resSubmit = 0;
+  window.__rated = 0; window.__rateSubmitClicks = 0; window.__smileys = 0; window.__ratingTyped = 0; window.__backWhileRating = 0;
+  const RATE = new URLSearchParams(location.search).get('rate') || '';
+  let smileyChosen = false;
+  // &ratebtn=1: Cancel and Submit are real <button>s rather than styled boxes. The live page's
+  // report listed no button for them, but either way the Submit has to be pressed.
+  if (new URLSearchParams(location.search).get('ratebtn') === '1') {
+    for (const id of ['ratecancel', 'ratesubmit']) {
+      const d = el(id), b = document.createElement('button');
+      b.id = id; b.type = 'button'; b.innerHTML = d.innerHTML; b.style.cssText = d.style.cssText + '; border:0; font:inherit';
+      d.replaceWith(b);
+    }
+  }
+  for (const sm of document.querySelectorAll('.sm')) sm.addEventListener('click', () => { window.__smileys++; smileyChosen = true; });
+  el('ratetext').addEventListener('input', () => { window.__ratingTyped++; });
+  el('ratecancel').addEventListener('click', () => { el('ratebox').style.display = 'none'; });
+  el('ratesubmit').addEventListener('click', () => {
+    window.__rateSubmitClicks++;
+    if (RATE === 'need' && !smileyChosen) { el('ratemsg').textContent = 'Please choose a rating first.'; return; }
+    window.__rated++;
+    el('ratebox').style.display = 'none';
+    el('results').style.display = 'none';
+    el('back').style.display = '';
+  });
+  el('resfinish').addEventListener('click', () => {
+    window.__resFinish++;
+    if (RATE) {                                      // the live behaviour: a rating box over the results page,
+      el('resfinish').style.display = 'none';        // with Back to Coursework already showing behind it
+      el('ratebox').style.display = '';
+      el('back').style.display = '';
+      return;
+    }
+    if (new URLSearchParams(location.search).get('under') !== '1') el('resfinish').style.display = 'none';
+    el('resdialog').style.display = '';
+    const lag = Number(new URLSearchParams(location.search).get('submitlag') || 0);
+    el('ressubmit').disabled = lag > 0;
+    if (lag > 0) setTimeout(() => { el('ressubmit').disabled = false; }, lag);
+  });
+  el('ressubmit').addEventListener('click', () => {
+    if (el('ressubmit').disabled) return;
+    window.__resSubmit++;
+    el('results').style.display = 'none';
+    el('back').style.display = '';
+  });
+
+  window.__backClicks = 0; window.__startClicks = 0; window.__decoyClicks = 0; window.__attemptStarts = 0;
+  for (const b of document.querySelectorAll('.astart')) b.addEventListener('click', () => {
+    window.__attemptStarts++;                      // another go at the same lesson: it goes "In progress"
+    b.textContent = 'Resume';
+  });
+  const STALE = new URLSearchParams(location.search).get('stale') === '1';
+  window.__popBacks = 0;
+
+  // The list of tasks (the live "For You" page). &stale=1: it still shows the lesson just finished,
+  // first among the ones that can be started — as the live list did — so pressing the first Start
+  // reopens a lesson that is done. &speaking=1: the lessons are titled like the live list's last one,
+  // "10. Speaking: A Sample Task" — a speaking lesson is done like any other.
+  // &begun=1: every lesson on the list is one already begun, so the button says Continue, as all four
+  // of the live list's rows once did; a begun lesson is picked up like a new one.
+  const SPEAKING = new URLSearchParams(location.search).get('speaking') === '1';
+  const BEGUN = new URLSearchParams(location.search).get('begun') === '1';
+  function showList() {
+    for (const id of ['stem', 'grid', 'slide', 'splash', 'submit', 'later', 'next', 'done', 'retry']) el(id).style.display = 'none';
+    document.querySelector('.prompt').style.display = 'none';
+    el('results').style.display = 'none';
+    el('ratebox').style.display = 'none';
+    el('end').style.display = 'none';
+    const rows = [];
+    for (let k = (STALE && lessonNo > 0) ? lessonNo : lessonNo + 1; k <= COURSE; k++) {
+      rows.push({ title: SPEAKING ? `${k}. Speaking: A Sample Task` : `Lesson ${k}: Skill Practice`, label: BEGUN ? 'Continue' : 'Start', lesson: k });
+    }
+    el('tasks').innerHTML = '';
+    for (const r of rows) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex; gap:14px; padding:8px 0; align-items:center';
+      row.innerHTML = `<b style="min-width:320px">${r.title}</b><span style="font-size:12px; color:#555">1 Task Assigned</span>`;
+      const b = document.createElement('button');
+      b.textContent = r.label;
+      b.style.cssText = 'border:0; background:none; text-decoration:underline; cursor:pointer; font:inherit';
+      b.addEventListener('click', () => {
+
+        window.__startClicks++;
+        startLesson(r.lesson, true);                 // a route change: a history entry for Back to return to
+      });
+      row.appendChild(b);
+      el('tasks').appendChild(row);
+    }
+    el('home').style.display = '';
+  }
+  el('back').addEventListener('click', () => {
+    window.__backClicks++;
+    if (el('ratebox').style.display !== 'none') window.__backWhileRating++;     // went round the rating box
+    history.pushState(null, '', location.pathname + location.search + LIST_URL);
+    showList();
+  });
+  window.addEventListener('popstate', () => {                                   // browser Back, to the list
+    if (location.hash.includes('/classes/')) { window.__popBacks++; showList(); }
+  });
+  el('cont').addEventListener('click', () => { window.__contClicks++; el('cont').style.display = 'none'; el('nextlesson').style.display = ''; });
+  el('nextlesson').addEventListener('click', () => {
+    window.__nextLessonClicks++;
+    if (END !== 'dead') startLesson(lessonNo + 1);
+  });
+
+  window.__retryClicks = 0;
+  el('retry').addEventListener('click', () => {
+    window.__retryClicks++;
+    render();                       // the same question again, unanswered
+  });
+
+  el('next').addEventListener('click', () => {
+    if (el('next').disabled) return;
+    if (slidesLeft > 0) { slidesLeft--; window.__slidesSkipped++; render(); return; }      // a slide: on to the next screen
+    if (!submittedCurrent) return;
+    window.__advanced++;
+    q++;
+    if (q >= QUESTIONS.length) { renderTail(); return; }
+    if (SLIDE_AFTER && q === 1 && !slidesShown) { slidesShown = true; slidesLeft = SLIDES; }   // slides between the first and second question
+    if (SPLASH === 'mid' && q === 1) splashPending = true;                                      // the next activity's title screen
+    render();
+  });
+
+  el('readPassage').addEventListener('click', () => {
+    const p = el('passage');
+    p.classList.toggle('open');
+    el('readPassage').style.display = p.classList.contains('open') ? 'none' : '';
+    window.__passageOpens = (window.__passageOpens || 0) + 1;
+  });
+
+  if (COURSE && (END === 'real' || END === 'attempts')) el('done').textContent = 'Finish';     // the live site's word for it
+  markLesson();
+  render();
+  if (new URLSearchParams(location.search).get('home') === '1') {         // the page opens on the list of tasks (the "For You" page)
+    lessonNo = 0;
+    history.replaceState(null, '', location.pathname + location.search + LIST_URL);
+    showList();
+  }
+  if (new URLSearchParams(location.search).get('ratenow') === '1') {      // the page opens on the rating box alone
+    for (const id of ['stem', 'grid', 'slide', 'splash', 'submit', 'later', 'next', 'done', 'retry', 'readPassage']) { const e = el(id); if (e) e.style.display = 'none'; }
+    document.querySelector('.prompt').style.display = 'none';
+    el('end').style.display = '';
+    el('results').style.display = '';
+    el('resfinish').style.display = 'none';
+    el('ratebox').style.display = '';
+  }
+</script>
+</body>
+</html>

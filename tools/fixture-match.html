@@ -1,0 +1,197 @@
+<!doctype html>
+<!-- Matching question, modelled on the live item: coloured dots on the left
+     items, empty rings on the right, a progress bar of tick circles and a round
+     help bulb — the round things that must NOT be mistaken for items.
+
+     How a link is made is the thing the real site hides, so it's switchable:
+       ?mode=click      click a left item, then a right item (handlers on the rows)
+       ?mode=clickdot   same, but only the dots/rings listen
+       ?mode=pointer    press on a dot, drag, release over a right item
+       ?mode=html5      draggable dots, native drag-and-drop events
+       &strict=1        ignore any event the page did not generate itself -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alef fixture — matching</title>
+<style>
+  body { margin: 0; font: 15px system-ui; color: #1c2430; background: #fff; }
+  .bar { display: flex; gap: 8px; align-items: center; padding: 14px 24px; }
+  .bar small { font-size: 9px; color: #666; }
+  .seg { flex: 1; height: 14px; background: #d6ecc9; border-radius: 7px; display: flex; justify-content: center; align-items: center; }
+  .chk { width: 11px; height: 11px; border-radius: 50%; background: #5aa832; display: flex; }
+  .chk svg { width: 9px; height: 9px; margin: auto; fill: #fff; }
+  .intro { display: flex; justify-content: space-between; width: 900px; margin: 18px auto 6px; }
+  .help { border: 0; background: none; font: 14px system-ui; color: #555; display: flex; gap: 8px; align-items: center; }
+  .bulb { width: 22px; height: 22px; border-radius: 50%; background: #fbe9a0; display: flex; }
+  .bulb svg { width: 10px; height: 10px; margin: auto; fill: #b8860b; }
+  h4 { color: #0a6a7a; margin: 4px auto; width: 900px; font-size: 14px; }
+  .cols { display: grid; grid-template-columns: 360px 1fr 360px; width: 900px; margin: 0 auto; }
+  .row { position: relative; display: flex; align-items: center; justify-content: space-between;
+         height: 44px; padding: 0 14px; margin-bottom: 58px; background: #e4f0ff; border-radius: 10px; cursor: pointer; }
+  .row.sel { outline: 2px solid #2f6bff; }
+  .L .dot, .R .ring { width: 16px; height: 16px; border-radius: 50%; flex: none; }
+  .R { flex-direction: row-reverse; justify-content: flex-end; gap: 14px; }
+  .R .ring { background: #fff; }
+  .foot { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 24px; display: flex;
+          justify-content: space-between; background: #fff; border-top: 2px solid #e6e9ef; }
+  .foot button { padding: 9px 22px; border-radius: 8px; border: 1px solid #c8ccd6; font: 600 15px system-ui; background: #fff; }
+  .foot #submit { background: #2f6bff; color: #fff; border-color: #2f6bff; }
+  .foot #submit:disabled { background: #d9f0ee; border-color: #d9f0ee; color: #a8cfcb; }
+  /* marks=pseudo: the dots are CSS pseudo-elements, so there is no element to find. */
+  .marks-pseudo .row::after { content: ''; width: 16px; height: 16px; border-radius: 50%; flex: none; background: var(--c, #fff); }
+  .marks-pseudo .R::after { border: 1px solid #ccd; box-sizing: border-box; }
+  svg.dot, svg.ring { width: 16px; height: 16px; flex: none; }
+  svg.overlay { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; }
+</style>
+</head>
+<body>
+<!-- The live lesson has a sidebar with an always-enabled "Check My Understanding"
+     button, before the question in the DOM. It must never be mistaken for Submit. -->
+<aside style="position:fixed; right:6px; top:70px; width:150px; z-index:5"><nav>
+  <button id="side" style="width:100%; padding:8px">Check My Understanding</button>
+</nav></aside>
+<script>window.__sideClicks = 0; document.getElementById('side').addEventListener('click', () => window.__sideClicks++);</script>
+<div class="bar">
+  <small>5/5</small>
+  <div class="seg"><div class="chk"><svg viewBox="0 0 10 10"><path d="M1 5l3 3 5-6"/></svg></div></div>
+  <div class="seg"><div class="chk"><svg viewBox="0 0 10 10"><path d="M1 5l3 3 5-6"/></svg></div></div>
+  <div class="seg"><div class="chk"><svg viewBox="0 0 10 10"><path d="M1 5l3 3 5-6"/></svg></div></div>
+  <div class="seg"><div class="chk"><svg viewBox="0 0 10 10"><path d="M1 5l3 3 5-6"/></svg></div></div>
+  <div class="seg" style="background:#2f8cff"></div>
+</div>
+
+<div class="intro">
+  <span>Match each set of employment figures with the sentence that reports the trend accurately.</span>
+  <button class="help" id="help">Need Help? <span class="bulb"><svg viewBox="0 0 10 10"><circle cx="5" cy="5" r="3"/></svg></span></button>
+</div>
+<h4>Match the items correctly.</h4>
+<div class="cols">
+  <h4 style="width:auto;margin:0 0 30px">Employment Figures</h4><span></span><h4 style="width:auto;margin:0 0 30px">Report Sentence</h4>
+  <div id="left"></div><span></span><div id="right"></div>
+</div>
+
+<svg class="overlay" id="overlay"></svg>
+<div class="foot"><button id="back">‹ Go Back</button><button id="submit" disabled>Submit Answer ›</button></div>
+
+<script>
+  const q = new URLSearchParams(location.search);
+  const MODE = q.get('mode') || 'click';
+  const STRICT = q.has('strict');
+  // How the dots and rings are drawn — the real site's choice can't be seen from outside.
+  const MARKS = q.get('marks') || 'div';       // div | svg | input | pseudo
+  if (MARKS === 'pseudo') document.body.classList.add('marks-pseudo');
+
+  const LEFT = ['Manufacturing: 20% → 16%', 'Renewable energy: 10% → 24%', 'Education: 16% → 18%',
+                'Fossil fuels: 22% → 14%', 'Healthcare: 18% → 23%'];
+  const RIGHT = ['Rose to 23%.', 'Fell by 8 points.', 'Rose by 14 points.', 'Rose slightly.', 'Fell by 4 points.'];
+  const EXPECTED = [4, 2, 3, 1, 0];
+  const COLORS = ['#7b1fa2', '#ff5722', '#ff9800', '#00b060', '#00aeef'];
+
+  window.__links = {};                       // left index -> right index
+  window.__ignored = 0;
+  let selected = null;
+
+  const ok = e => { if (STRICT && !e.isTrusted) { window.__ignored++; return false; } return true; };
+
+  function link(i, j) {
+    for (const k of Object.keys(window.__links)) if (window.__links[k] === j || Number(k) === i) delete window.__links[k];
+    window.__links[i] = j;
+    RIGHT.forEach((_, jj) => {
+      const row = document.querySelector(`.R[data-j="${jj}"]`);
+      const from = Object.keys(window.__links).find(k => window.__links[k] === jj);
+      const colour = from == null ? '#fff' : COLORS[from];
+      row.style.setProperty('--c', colour);                   // what a pseudo-element ring reads
+      const ring = row.querySelector('.ring');
+      if (ring) ring.style.background = colour;
+    });
+    document.getElementById('submit').disabled = Object.keys(window.__links).length < LEFT.length;
+  }
+  function select(i) {
+    selected = i;
+    document.querySelectorAll('.L').forEach(r => r.classList.toggle('sel', Number(r.dataset.i) === i));
+  }
+
+  const left = document.getElementById('left'), right = document.getElementById('right');
+  LEFT.forEach((t, i) => {
+    const r = document.createElement('div');
+    r.className = 'row L'; r.dataset.i = i;
+    r.style.setProperty('--c', COLORS[i]);
+    r.innerHTML = `<span>${t}</span>` + (
+      MARKS === 'svg' ? `<svg class="dot" viewBox="0 0 16 16"><circle cx="8" cy="8" r="8" fill="${COLORS[i]}"/></svg>`
+      : MARKS === 'pseudo' ? ''                                      // drawn by ::after — no element at all
+      : `<div class="dot" style="background:${COLORS[i]}"></div>`);
+    left.appendChild(r);
+  });
+  RIGHT.forEach((t, j) => {
+    const r = document.createElement('div');
+    r.className = 'row R'; r.dataset.j = j;
+    r.innerHTML = `<span>${t}</span>` + (
+      MARKS === 'svg' ? '<svg class="ring" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7.5" fill="#fff" stroke="#ccd"/></svg>'
+      : MARKS === 'input' ? '<input type="radio" class="ring" tabindex="-1">'   // a real radio, as some sites do
+      : MARKS === 'pseudo' ? ''
+      : '<div class="ring"></div>');
+    right.appendChild(r);
+  });
+
+  if (MODE === 'click' || MODE === 'clickdot') {
+    const lt = el => MODE === 'click' ? el : el.querySelector('.dot');
+    const rt = el => MODE === 'click' ? el : el.querySelector('.ring');
+    document.querySelectorAll('.L').forEach(el => lt(el).addEventListener('click', e => {
+      if (!ok(e)) return; select(selected === Number(el.dataset.i) ? null : Number(el.dataset.i)); }));
+    document.querySelectorAll('.R').forEach(el => rt(el).addEventListener('click', e => {
+      if (!ok(e) || selected == null) return; link(selected, Number(el.dataset.j)); select(null); }));
+  }
+
+  if (MODE === 'pointer') {
+    const svg = document.getElementById('overlay');
+    let from = null, line = null;
+    document.querySelectorAll('.L .dot').forEach(dot => dot.addEventListener('pointerdown', e => {
+      if (!ok(e)) return;
+      from = Number(dot.parentElement.dataset.i);
+      line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', e.clientX); line.setAttribute('y1', e.clientY);
+      line.setAttribute('x2', e.clientX); line.setAttribute('y2', e.clientY);
+      line.setAttribute('stroke', COLORS[from]); line.setAttribute('stroke-width', '3');
+      svg.appendChild(line);
+    }));
+    document.addEventListener('pointermove', e => {
+      if (line) { line.setAttribute('x2', e.clientX); line.setAttribute('y2', e.clientY); }
+    });
+    document.addEventListener('pointerup', e => {
+      if (from == null) return;
+      const hit = document.elementFromPoint(e.clientX, e.clientY);
+      const row = hit && hit.closest('.R');
+      if (row) link(from, Number(row.dataset.j));
+      line.remove(); line = null; from = null;           // a rubber band always goes away
+    });
+  }
+
+  if (MODE === 'html5') {
+    document.querySelectorAll('.L .dot').forEach(dot => {
+      dot.draggable = true;
+      dot.addEventListener('dragstart', e => {
+        if (!ok(e)) { e.preventDefault(); return; }
+        e.dataTransfer.setData('text/plain', dot.parentElement.dataset.i);
+      });
+    });
+    document.querySelectorAll('.R').forEach(row => {
+      row.addEventListener('dragover', e => e.preventDefault());
+      row.addEventListener('drop', e => {
+        e.preventDefault();
+        const i = e.dataTransfer.getData('text/plain');
+        if (i !== '') link(Number(i), Number(row.dataset.j));
+      });
+    });
+  }
+
+  document.getElementById('submit').addEventListener('click', e => {
+    const b = e.currentTarget;
+    if (b.disabled || !ok(e)) return;
+    window.__matchSubmitted = true;
+    window.__matchCorrect = LEFT.every((_, i) => window.__links[i] === EXPECTED[i]);
+    b.textContent = window.__matchCorrect ? 'Correct' : 'Incorrect';
+    b.disabled = true;
+  });
+</script>
+</body>
+</html>

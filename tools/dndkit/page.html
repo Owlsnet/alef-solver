@@ -1,0 +1,44 @@
+<!doctype html>
+<!-- Host page for tools/dndkit/app.jsx — the drag-and-drop question on the real
+     @dnd-kit/core. The bundle is built by `node tools/dndkit/setup.js` into
+     .tmp/dndkit (it is not kept in the project). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alef fixture — drag and drop on dnd-kit</title>
+<style>
+  body { margin: 0; font: 16px system-ui; color: #1c2430; background: #fff; }
+  .layout { display: flex; gap: 40px; margin: 70px 0 0 120px; }
+  .left { width: 600px; }
+  h4 { color: #0a6a7a; margin: 0 0 14px; font-size: 14px; }
+  p { margin: 0 0 14px; line-height: 2.6; }
+  .zone { display: inline-block; width: 150px; height: 40px; border: 1.5px dashed #555; border-radius: 6px;
+          vertical-align: middle; margin: 0 4px; box-sizing: border-box; padding: 11px 14px; }
+  .zone svg { width: 16px; height: 16px; fill: #333; }
+  .zone.over { background: #e6f0ff; }
+  .zone.filled { width: auto; min-width: 110px; border-style: solid; border-color: #6aa0f0; padding: 2px 6px; }
+  .zone.filled .item { height: 34px; margin: 0; width: auto; }
+  .tray { width: 288px; padding: 12px; background: #e9f1ff; border-radius: 12px; align-self: flex-start; min-height: 60px; }
+  .item { display: flex; align-items: center; gap: 10px; width: 100%; height: 46px; padding: 0 14px; margin-bottom: 3px;
+          background: #cfe2ff; border: 1px solid #6aa0f0; border-radius: 8px; box-sizing: border-box; cursor: grab;
+          user-select: none; touch-action: none; font: inherit; text-align: left; }
+  .item.dragging { opacity: .55; }
+  /* overlay=chip: tray rows far wider than their label, as on the live page (a 352px row, a ~76px chip) */
+  .wide-rows .tray { width: 420px; }
+  .item.overlay { box-shadow: 0 6px 16px #0003; }
+  .grip { width: 12px; height: 16px; flex: none; fill: #5a7bb5; }
+  .zones-pseudo .zone, .zones-pseudo .zone.filled { border: none; position: relative; }
+  .zones-pseudo .zone::before { content: ''; position: absolute; inset: 0; border: 1.5px dashed #555; border-radius: 6px; pointer-events: none; }
+  .zones-plain .zone, .zones-plain .zone.filled { border: none; background: #eef1f7; }
+  .foot { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 24px; display: flex;
+          justify-content: space-between; background: #fff; border-top: 2px solid #e6e9ef; }
+  .foot button { padding: 9px 22px; border-radius: 8px; border: 1px solid #c8ccd6; font: 600 15px system-ui; background: #fff; }
+  .foot #submit { background: #2f6bff; color: #fff; border-color: #2f6bff; }
+  .foot #submit:disabled { background: #d9f0ee; border-color: #d9f0ee; color: #a8cfcb; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="../../.tmp/dndkit/app.js"></script>
+</body>
+</html>

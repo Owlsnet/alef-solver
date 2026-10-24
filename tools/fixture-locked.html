@@ -1,0 +1,120 @@
+<!doctype html>
+<!-- An Arabic multiple-choice question that has ALREADY been answered, wrongly — what a run lands on
+     when it opens a lesson that was started before. Laid out as the live page was in the report: right
+     to left, four role=radio cards in a radiogroup, the chosen one marked "lib-is-selected
+     lib-is-incorrect" with a red cross, a red feedback bar ("Sorry, incorrect. Try again.") in the
+     footer, and — in place of Submit — the button "أحاولُ ثانيـةً" ("I try again": first person, with
+     a stretched letter, like the page's Submit "أُرسلُ إجابتي" and its Back "أعودُ").
+     While the answer is marked, the cards ignore presses. Try Again gives the question back.
+
+     ?noaria=1   the marked card shows it by its classes only (aria-checked stays false)
+     ?right=N    the card (0-3) that is right; the default is B (1)                                  -->
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>Alef fixture — an answered question, in Arabic</title>
+<style>
+  body { margin: 0; font: 18px system-ui; color: #1c2430; background: #fff; }
+  .wrap { margin: 40px auto 0; width: 920px; }
+  h2 { font-size: 22px; margin: 0 0 24px; }
+  .lib-instruction-label { margin: 0 0 12px; font-size: 16px; color: #0a6a7a; }
+  .lib-options-list-container { display: flex; flex-direction: column; gap: 12px; }
+  .lib-mcq-option-container { border: 1px solid #556; border-radius: 6px; cursor: pointer; }
+  .lib-mcq-option-container.lib-is-selected { border-color: #2a7bff; background: #eef4ff; }
+  .lib-mcq-option-container.lib-is-incorrect { border-color: #e0525b; background: #fde8ea; }
+  .lib-mcq-option-wrapper { display: flex; align-items: center; height: 50px; }
+  .lib-mcq-icon-container { width: 42px; display: flex; justify-content: center; }
+  .lib-radio-unselected { width: 16px; height: 16px; border: 2px solid #99a; border-radius: 50%; box-sizing: border-box; }
+  .lib-mcq-option-content-container { flex: 1; padding: 0 12px; }
+  aside { position: fixed; left: 6px; top: 70px; width: 150px; z-index: 5; font-size: 12px; }
+  .lib-navigation-container { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 24px; background: #fff; border-top: 2px solid #e6e9ef; }
+  .lib-navigation-buttons { display: flex; align-items: center; gap: 16px; }
+  .lib-feedback-container { flex: 1; background: #fde8ea; padding: 10px 14px; border-radius: 8px; }
+  .lib-navigation-container button { padding: 10px 22px; border-radius: 8px; border: 1px solid #c8ccd6; font: 600 15px system-ui; background: #2f6bff; color: #fff; }
+  .lib-navigation-container button[data-testid=navigation-secondary] { background: #fff; color: #1c2430; }
+  .lib-navigation-container button:disabled { opacity: .4; }
+</style>
+</head>
+<body>
+<aside><nav><button id="side" style="width:100%;padding:8px">أقيّم مستوى فهمي</button></nav></aside>
+
+<div id="template-container" class="lib-template-container lib-vw-desktop lib-responsive-fluid"><div class="lib-template-container-wrapper-with-breakpoint lib-template-container-wrapper">
+  <div id="unified-widget-header-section" class="lib-widget-header-section-container"><div class="lib-show-video-need-help-container"><button aria-label="Need Help?" type="button">أحتاجُ مساعدةً</button> <button aria-label="Play audio" type="button">Play audio</button></div></div>
+  <div class="wrap">
+    <div class="lib-mcq-container lib-text lib-question-widget"><div class="lib-mcq-widget-wrapper">
+      <div class="lib-question-statement-container"><h2>أيٌّ منَ الأبياتِ الشّعريَّـةِ التّاليـةِ يحملُ معنًى قريبًا لما وردَ في الفقرةِ المسموعـةِ؟</h2></div>
+      <div class="lib-options-container"><div class="lib-options-container-wrapper">
+        <h3 id="question-instruction" class="lib-instruction-label" data-testid="question-instruction">أختارُ الإجابةَ الصحيحة.</h3>
+        <div id="options-group-1" class="lib-options-list-container lib-col--1" role="radiogroup"></div>
+      </div></div>
+    </div></div>
+  </div>
+</div></div>
+
+<div id="widgets-navigation-container" class="lib-navigation-container" data-testid="navigation-container"><div class="lib-navigation-buttons" data-testid="navigation-buttons">
+  <div class="lib-secondary-button-wrapper"><button data-testid="navigation-secondary" type="button">أعودُ</button></div>
+  <div id="feedback-slot" style="flex:1"></div>
+  <div class="lib-navigation-next-skip-wrapper"><button id="main" class="lib-btn-next" data-testid="navigation-next-butt" type="button"></button></div>
+</div></div>
+
+<script>
+  const Q = new URLSearchParams(location.search);
+  const NOARIA = Q.has('noaria');
+  const RIGHT = Q.has('right') ? Number(Q.get('right')) : 1;
+  const TEXTS = [
+    'فكرِّرْ درسَـهُ ليلًا وصبحًا *** وجرِّدْ فيـهِ عزمَكَ ما استطعْتَا',
+    'إذا لَم تَستَطِعْ شَيئًا فَدَعْـهُ *** وَجاوِزْهُ إِلى ما تستَطيعُ',
+    'فإنَّ العلمَ أعظمُ ما تسامَتْ *** لَـهُ هِمَمٌ وأشرفُ ما اكتسبْتَا',
+    'وما نَيـلُ المَطالبِ بالتمنّي *** ولكِنْ تُؤخَذُ الدُّنيا غِلابَا',
+  ];
+
+  window.__retryClicks = 0; window.__submitClicks = 0; window.__presses = 0; window.__graded = null; window.__chosen = 2;
+  let state = 'wrong';        // asking | wrong | right
+  let chosen = 2;             // the card shown as picked (C, wrongly)
+
+  const group = document.getElementById('options-group-1');
+  const main = document.getElementById('main');
+  const feedback = document.getElementById('feedback-slot');
+
+  TEXTS.forEach((t, i) => {
+    const c = document.createElement('div');
+    c.className = 'lib-mcq-option-container';
+    c.setAttribute('role', 'radio');
+    c.dataset.testid = 'mcq-option-container';
+    c.innerHTML = `<div class="lib-mcq-option-wrapper"><div class="lib-mcq-icon-container"><span class="lib-radio-unselected"></span></div><div class="lib-mcq-option-content-container"><span class="lib-html-container lib-html-text"><span><span class="lib-html-text-wrapper">${t}</span></span></span></div></div>`;
+    c.addEventListener('click', () => {
+      window.__presses++;
+      if (state !== 'asking') return;            // a marked answer is locked
+      chosen = i; window.__chosen = i; render();
+    });
+    group.appendChild(c);
+  });
+
+  function render() {
+    [...group.children].forEach((c, i) => {
+      const on = chosen === i;
+      c.classList.toggle('lib-is-selected', on);
+      c.classList.toggle('lib-is-incorrect', on && state === 'wrong');
+      c.setAttribute('aria-checked', on && !NOARIA ? 'true' : 'false');
+    });
+    feedback.innerHTML = state === 'wrong'
+      ? '<div class="lib-feedback-container lib-incorrect"><span>عفوًا، غير صحيح. حاول مرة أخرى.</span></div>' : '';
+    main.textContent = state === 'wrong' ? 'أحاولُ ثانيـةً' : state === 'right' ? 'التالي' : 'أُرسلُ إجابتي';
+    main.disabled = state === 'asking' && chosen < 0;
+    main.type = state === 'asking' ? 'submit' : 'button';
+  }
+
+  main.addEventListener('click', () => {
+    if (main.disabled) return;
+    if (state === 'wrong') { window.__retryClicks++; chosen = -1; window.__chosen = -1; state = 'asking'; render(); return; }
+    if (state === 'asking') {
+      window.__submitClicks++;
+      window.__graded = chosen === RIGHT ? 'right' : 'wrong';
+      state = window.__graded;
+      render();
+    }
+  });
+  render();
+</script>
+</body>
+</html>

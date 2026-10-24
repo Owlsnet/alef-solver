@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Alef Solver",
+  "version": "0.6.21",
+  "description": "Reads the current question, asks the AI, picks the answer, submits.",
+
+  "permissions": ["storage", "tabs", "activeTab", "scripting"],
+  "host_permissions": [
+    "https://openrouter.ai/*",
+    "https://*.alefed.com/*"
+  ],
+
+  "background": { "service_worker": "background.js", "type": "module" },
+
+  "content_scripts": [
+    {
+      "matches": ["https://*.alefed.com/*", "https://alefed.com/*"],
+      "js": ["bridge-main.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://*.alefed.com/*", "https://alefed.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Alef Solver"
+  },
+
+  "options_page": "options.html"
+}

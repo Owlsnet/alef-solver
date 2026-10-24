@@ -1,0 +1,105 @@
+<!doctype html>
+<!-- Second fixture: reproduces the REAL layout seen in the live page, where each
+     choice is TWO bordered grid cells — a narrow one holding the radio and a
+     wide one holding the text. Also uses native <input type=radio>, not
+     [role=radio], so this exercises the native-radio grouping path.
+
+     This layout is what breaks a naive "control.parentElement = the row" rule:
+     the row it finds is the empty circle cell. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alef fixture — split cells</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; margin: 0; background: #fff; color: #111; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 40px; position: relative; }
+  .read-passage {
+    display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px;
+    border: 1px solid #d6dae3; border-radius: 8px; background: #f7f8fa;
+    font: 500 13px/1 system-ui; color: #333; cursor: pointer; margin-bottom: 20px;
+  }
+  .passage { display: none; }
+  .passage.open { display: block; margin-bottom: 26px; max-width: 720px; }
+  .stem { font-weight: 700; font-size: 17px; margin: 0 0 8px; max-width: 560px; }
+  .prompt { color: #2a6fd6; font-weight: 600; font-size: 14px; margin: 0 0 18px; }
+
+  /* the important part: two cells per choice */
+  .grid {
+    display: grid; grid-template-columns: 108px 1fr 108px 1fr;
+    gap: 14px; max-width: 940px;
+  }
+  .cell {
+    border: 1px solid #d8dce4; border-radius: 4px; background: #fff;
+    display: flex; align-items: center; padding: 14px 16px;
+    font: 14px/1.5 system-ui;
+  }
+  .cell.radio { justify-content: center; cursor: pointer; }
+  .cell.text { align-items: center; }
+  .cell:has(input:checked) { border-color: #2a6fd6; background: #f2f7ff; }
+  input[type=radio] { width: 18px; height: 18px; accent-color: #2a6fd6; cursor: pointer; }
+  .submit {
+    margin-top: 26px; padding: 11px 30px; border: 0; border-radius: 5px;
+    background: #2a6fd6; color: #fff; font: 600 14px/1 system-ui; cursor: pointer;
+  }
+  .submit[disabled] { background: #c8cfda; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <button class="read-passage" id="readPassage">📄 Read Passage</button>
+
+  <div class="passage" id="passage">
+    <p>Automation did not arrive in the warehouse all at once. The company first
+    introduced handheld scanners, then conveyor sorting, then robots that could
+    lift a pallet without being told where to put it. Each step was announced as
+    relief from drudgery, and each step did remove some. What it also did — more
+    quietly — was reassign the judgement to the machine and the remaining worker
+    to the machine's errors.</p>
+    <p>Globalisation pulled in the other direction. Cheap freight meant the
+    company could move a distribution centre overseas, and it did, then brought
+    it back when the freight stopped being cheap. Through both moves, the people
+    who had learned the scanners and the conveyor and the robots kept their jobs,
+    because they were the only ones who could tell when the system was wrong.</p>
+  </div>
+
+  <p class="stem">How does the author develop the central idea throughout the passage?</p>
+  <p class="prompt">Select the correct answer.</p>
+
+  <div class="grid" id="grid">
+    <label class="cell radio"><input type="radio" name="q1" value="0"></label>
+    <div class="cell text">The author describes changes in technology and then explains why companies should avoid outsourcing jobs.</div>
+
+    <label class="cell radio"><input type="radio" name="q1" value="1"></label>
+    <div class="cell text">The author introduces workforce changes and then presents two perspectives on their opportunities and challenges.</div>
+
+    <label class="cell radio"><input type="radio" name="q1" value="2"></label>
+    <div class="cell text">The author describes workplace changes and then argues that technology benefits workers more than globalisation.</div>
+
+    <label class="cell radio"><input type="radio" name="q1" value="3"></label>
+    <div class="cell text">The author introduces globalisation and then shows how workers can develop skills for new careers.</div>
+  </div>
+
+  <button class="submit" id="submit" disabled>Submit</button>
+</div>
+
+<script>
+  const submit = document.getElementById('submit');
+  for (const r of document.querySelectorAll('input[name=q1]')) {
+    r.addEventListener('change', () => {
+      window.__fixtureSelection = Number(r.value);
+      submit.disabled = false;
+    });
+  }
+  document.getElementById('readPassage').addEventListener('click', () => {
+    document.getElementById('passage').classList.add('open');
+    document.getElementById('readPassage').style.display = 'none';
+  });
+  submit.addEventListener('click', () => {
+    if (submit.disabled) return;
+    window.__fixtureSubmitted = true;
+    submit.textContent = 'Submitted';
+    submit.disabled = true;
+  });
+</script>
+</body>
+</html>

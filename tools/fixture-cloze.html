@@ -1,0 +1,142 @@
+<!doctype html>
+<!-- Fill-in-the-blank fixture, modelled on the real page: instructions with
+     figures, a sentence with four inline text inputs, and a Word Bank that
+     contains BOTH the verb and the noun forms (increase/increased,
+     decrease/decreased) — so getting the part of speech right is the whole
+     difficulty of the question.
+
+     Inputs are React-style controlled: a 'change' handler rewrites the value, so
+     plain `input.value = x` would be silently reverted. That's what proves
+     setInputValue() is using the native setter. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alef fixture — cloze</title>
+<style>
+  body { font: 16px/1.7 system-ui, sans-serif; margin: 0; background: #f3f6f4; color: #111; }
+  .page { display: flex; justify-content: center; gap: 60px; padding: 46px 40px 90px; }
+  .main { max-width: 620px; }
+  .instr { font-weight: 700; font-size: 15px; margin: 0 0 18px; line-height: 1.7; }
+  .instr .figs { font-weight: 700; }
+  .hint { color: #2a6fd6; font-weight: 600; font-size: 14px; margin: 0 0 22px; }
+  .body-text { font-size: 15px; line-height: 2.6; max-width: 640px; }
+  input.blank {
+    width: 96px; padding: 5px 8px; border: 1px solid #b9c2d0; border-radius: 4px;
+    font: 15px/1.4 system-ui; background: #fff; text-align: center;
+  }
+  input.blank:focus { outline: 2px solid #8ab0f0; }
+  input.blank[readonly] { background: #f4f6f9; color: #333; }
+  .bank { width: 190px; background: #e8f0fb; border-radius: 8px; padding: 16px;
+    align-self: flex-start; }
+  .bank h3 { margin: 0 0 14px; font: 700 13px/1 system-ui; text-align: center; }
+  .bank div.term { font: 14px/1 system-ui; padding: 7px 0; color: #1f3a63; }
+  .foot { position: fixed; bottom: 0; left: 0; right: 0; padding: 16px 26px;
+    background: #fff; border-top: 1px solid #e6e9ef;
+    display: flex; justify-content: space-between; align-items: center; }
+  .go { padding: 11px 26px; border: 1px solid #d6dae3; border-radius: 5px;
+    background: #fff; font: 600 14px/1 system-ui; cursor: pointer; }
+  .go.primary { background: #2a6fd6; color: #fff; border: 0; }
+  .go.primary[disabled] { background: #c8cfda; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<!-- The live lesson has a sidebar with an always-enabled "Check My Understanding"
+     button, before the question in the DOM. It must never be mistaken for Submit. -->
+<aside style="position:fixed; right:6px; top:70px; width:150px; z-index:5"><nav>
+  <button id="side" style="width:100%; padding:8px">Check My Understanding</button>
+</nav></aside>
+<script>window.__sideClicks = 0; document.getElementById('side').addEventListener('click', () => window.__sideClicks++);</script>
+<div class="page">
+  <div class="main">
+    <p class="instr">
+      Complete the overview.<br>
+      <span class="figs">Use these figures: technology 8% → 18%, tourism 12% → 20%,
+      construction 25% → 19%, and energy 20% → 17%.</span>
+    </p>
+    <p class="hint">Type the correct answer(s). Use the Word Bank.</p>
+
+    <div class="body-text" id="body">
+      Overall, employment <input class="blank" id="b1" placeholder="Type…" maxlength="12"> in
+      technology and tourism but <input class="blank" id="b2" placeholder="Type…" maxlength="12"> in
+      construction and energy. Technology had the largest
+      <input class="blank" id="b3" placeholder="Type…" maxlength="12">, while construction had
+      the biggest <input class="blank" id="b4" placeholder="Type…" maxlength="12">.
+    </div>
+  </div>
+
+  <div class="bank" id="bank">
+    <h3>Word Bank:</h3>
+    <div class="term">equal</div>
+    <div class="term">stable</div>
+    <div class="term">increased</div>
+    <div class="term">decreased</div>
+    <div class="term">higher</div>
+    <div class="term">increase</div>
+    <div class="term">decrease</div>
+  </div>
+</div>
+
+<div class="foot">
+  <button class="go" id="back">‹ Go Back</button>
+  <button class="go primary" id="submit" disabled>Submit Answer ›</button>
+</div>
+
+<script>
+  const EXPECTED = ['increased', 'decreased', 'increase', 'decrease'];
+  window.__typed = {};
+
+  /* Controlled inputs: the handler rewrites .value from its own state, exactly
+     as a React controlled component does. Assigning .value directly then gets
+     overwritten on the next render — only the native setter plus a dispatched
+     'input' event survives. */
+  for (const el of document.querySelectorAll('input.blank')) {
+    const key = el.id;
+    el._state = '';
+
+    el.addEventListener('input', e => {
+      el._state = e.target.value;
+      window.__typed[key] = el._state;
+      const anyFilled = [...document.querySelectorAll('input.blank')].some(i => i._state.trim());
+      document.getElementById('submit').disabled = !anyFilled;
+    });
+
+    // A "re-render" that pushes state back into the DOM — this is what clobbers
+    // a naive value assignment.
+    el.addEventListener('blur', () => {
+      if (el.value !== el._state) el.value = el._state;
+    });
+  }
+
+  /* The handler lives on the WRAPPER, not the button — the button is enabled
+     and looks pressable, but firing an event AT it is one step away from where
+     the site is listening.
+
+     ?strict=1 goes further and ignores any event the page didn't generate
+     itself. That is the case a content script cannot synthesise its way out of,
+     and it's the one worth knowing about. */
+  const strict = new URLSearchParams(location.search).has('strict');
+
+  function onSubmit(e) {
+    if (strict && !e.isTrusted) {
+      window.__ignoredUntrusted = (window.__ignoredUntrusted || 0) + 1;
+      return;
+    }
+    const s = document.getElementById('submit');
+    if (s.disabled) return;
+    window.__clozeSubmitted = true;
+    window.__clozeAnswers = [...document.querySelectorAll('input.blank')].map(i => i._state);
+    const right = JSON.stringify(window.__clozeAnswers) === JSON.stringify(EXPECTED);
+    window.__clozeCorrect = right;
+    s.textContent = right ? 'Correct' : 'Incorrect';
+    s.disabled = true;
+  }
+
+  // Listening on the wrapper, with the button as a descendant.
+  document.querySelector('.foot').addEventListener('click', e => {
+    if (e.target.closest('#submit')) onSubmit(e);
+  });
+
+  document.getElementById('back').addEventListener('click', () => {});
+</script>
+</body>
+</html>

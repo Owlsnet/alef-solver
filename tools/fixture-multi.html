@@ -1,0 +1,166 @@
+<!doctype html>
+<!-- Synthetic stand-in for the live site's "Select the correct answers" question: eight answer cards,
+     each a role=checkbox (aria-checked) inside a role=selectgroup, the formulas drawn by MathJax (an
+     <mjx-container> with the drawn glyphs and an invisible MathML copy beside them). Modelled on what
+     the live page's dump showed, class names and all. Ticking a card turns it on; ticking it again
+     turns it off. Submit enables with one or more ticked; the page then says Next (right) or Try Again.
+
+     The right answers are B and E (the same set written two ways).
+
+     ?pre=0,2       cards already ticked when the page opens
+     ?lag=1         a card changes 300ms after the press (the page's own state is asynchronous)
+     ?inner=1       the card itself ignores a press; only the little button inside it ticks it
+     ?stick=3       the page refuses to tick card 3 (it flips straight back)
+     ?header=1      the site's own header, with two switches of its own (role=checkbox)
+     ?radio=1       the same question as single choice (role=radio), for comparison
+     ?bare=1        no answer cards at all — a page with only the header's two switches and the
+                    footer, so anything that takes those switches for answers shows                  -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alef fixture — select the correct answers</title>
+<style>
+  body { margin: 0; font: 16px system-ui; color: #1c2430; background: #fff; }
+  header { height: 44px; display: flex; gap: 16px; align-items: center; padding: 0 24px; background: #f3f5f9; }
+  header [role=checkbox] { padding: 4px 10px; border: 1px solid #99a; border-radius: 12px; cursor: pointer; }
+  header [role=checkbox][aria-checked=true] { background: #cfe2ff; }
+  aside { position: fixed; right: 6px; top: 70px; width: 150px; z-index: 5; font-size: 12px; }
+  .wrap { margin: 40px 0 0 120px; width: 1220px; }
+  .lib-question-statement-container { font-size: 20px; margin-bottom: 24px; }
+  .lib-instruction-label { margin: 0 0 12px; font-size: 16px; }
+  .lib-options-list-container { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .lib-mcq-option-container { border: 1px solid #556; border-radius: 6px; cursor: pointer; }
+  .lib-mcq-option-container[aria-checked="true"] { border-color: #2a7bff; background: #eef4ff; }
+  .lib-mcq-option-wrapper { display: flex; align-items: center; height: 54px; }
+  .lib-mcq-icon-container { width: 42px; height: 54px; display: flex; align-items: center; justify-content: center; }
+  .lib-radio-unselected { width: 18px; height: 18px; border: 2px solid #99a; border-radius: 50%; box-sizing: border-box; }
+  [aria-checked="true"] .lib-radio-unselected { background: #2a7bff; }
+  .lib-radio-selected, .lib-radio-incorrect, .lib-radio-correct { width: 0; height: 0; }
+  .lib-mcq-option-content-container { flex: 1; }
+  .lib-is-truncated { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  mjx-container { display: inline-block; }
+  mjx-assistive-mml { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .lib-navigation-container { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 24px; display: flex; justify-content: space-between; background: #fff; border-top: 2px solid #e6e9ef; }
+  .lib-navigation-container button { padding: 10px 22px; border-radius: 8px; border: 1px solid #c8ccd6; font: 600 15px system-ui; background: #2f6bff; color: #fff; }
+  .lib-navigation-container button:disabled { background: #d9f0ee; color: #a8cfcb; opacity: .4; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+  const Q = new URLSearchParams(location.search);
+  const RADIO = Q.has('radio');
+  const ROLE = RADIO ? 'radio' : 'checkbox';
+  const RIGHT = [1, 4];
+  const STICK = Q.has('stick') ? Number(Q.get('stick')) : -1;
+  const LAG = Q.has('lag');
+  const INNER = Q.has('inner');
+
+  const mjx = (visual, mathml) =>
+    `<mjx-container class="MathJax"><mjx-math class="MJX-TEX">${visual}</mjx-math>` +
+    `<mjx-assistive-mml><math xmlns="http://www.w3.org/1998/Math/MathML">${mathml}</math></mjx-assistive-mml></mjx-container>`;
+  const v = '<mjx-mi class="mjx-i"><mjx-c class="mjx-c1D465"></mjx-c></mjx-mi>';
+  const mo = s => `<mo>${s}</mo>`;
+  const mn = s => `<mn>${s}</mn>`;
+  const X = '<mi>x</mi>';
+  const set = (...inner) => `<mrow>${mo('{')}${mo('')}</mrow>${X}<mrow>${mo('|')}${mo('')}</mrow>${inner.join('')}<mrow>${mo('')}${mo('}')}</mrow>`;
+  const OPTIONS = [
+    set(mo('−'), mn(2), mo('≤'), X, mo('≤'), mn('0.5')),                                                             // {x | −2 ≤ x ≤ 0.5}
+    `${mo('(')}${mo('−')}<mi>∞</mi>${mo(',')}${mo('−')}${mn('2.89')}${mo(']')}${mo('∪')}${mo('[')}${mn('1.39')}${mo(',')}<mi>∞</mi>${mo(')')}`,   // (−∞, −2.89] ∪ [1.39, ∞)
+    `${mo('(')}${mo('−')}<mi>∞</mi>${mo(',')}${mo('−')}${mn('2.89')}${mo(')')}${mo('∪')}${mo('(')}${mn('1.39')}${mo(',')}<mi>∞</mi>${mo(')')}`,   // (−∞, −2.89) ∪ (1.39, ∞)
+    set(X, mo('≤'), mo('−'), mn('5.5'), '<mtext>or</mtext>', X, mo('≥'), mn('2.5')),                                  // {x | x ≤ −5.5 or x ≥ 2.5}
+    set(X, mo('≤'), mo('−'), mn('2.89'), '<mtext>or</mtext>', X, mo('≥'), mn('1.39')),                                // {x | x ≤ −2.89 or x ≥ 1.39}
+    `${mo('[')}${mo('−')}${mn('2.89')}${mo(',')}${mn('1.39')}${mo(']')}`,                                             // [−2.89, 1.39]
+    `${mo('(')}${mo('−')}${mn('2.89')}${mo(',')}${mn('1.39')}${mo(')')}`,                                             // (−2.89, 1.39)
+    '<mi mathvariant="double-struck">ℝ</mi>',                                                                         // ℝ
+  ];
+
+  const stem = 'Solve the quadratic inequality ' +
+    mjx(v, `${mn(2)}<msup>${X}<mrow>${mn(2)}</mrow></msup>${mo('+')}${mn(3)}${X}${mo('−')}${mn(8)}${mo('≥')}${mn(0)}`) +
+    ' algebraically and select the correct solution set from the below options.';
+
+  const card = (i, m) => `
+    <div class="lib-mcq-option-container" role="${ROLE}" aria-checked="false" aria-label="MCQOption ${i + 1}: \\(\\left" data-testid="mcq-option-container" data-i="${i}">
+      <div class="lib-mcq-option-wrapper">
+        ${INNER ? '<button type="button" class="lib-mcq-icon-container" aria-label="Choose this answer">' : '<div class="lib-mcq-icon-container">'}<img class="lib-radio-unselected" alt=""><img class="lib-radio-selected" alt=""><img class="lib-radio-incorrect" alt=""><img class="lib-radio-correct" alt="">${INNER ? '</button>' : '</div>'}
+        <div id="option-${i + 6}-content" class="lib-mcq-option-content-container">
+          <span class="lib-html-container lib-html-text lib-has-equation"><span><span class="lib-html-text-wrapper lib-is-truncated lib-has-equation" data-testid="mcq-item-label">${mjx('<mjx-mo></mjx-mo>', m)}</span></span></span>
+        </div>
+        <div class="lib-mcq-option-icon-container"><img class="lib-option-icon lib-option-correct-icon" alt=""><img class="lib-option-icon lib-option-incorrect-icon" alt=""></div>
+      </div>
+    </div>`;
+
+  document.getElementById('app').innerHTML = `
+    ${Q.has('header') ? `<header class="header__bar"><span>Alef</span>
+        <span role="checkbox" aria-checked="false" tabindex="0" data-sw="dark">Dark mode</span>
+        <span role="checkbox" aria-checked="true" tabindex="0" data-sw="sound">Sound effects</span></header>` : ''}
+    <aside><nav><button id="side" style="width:100%;padding:8px">Check My Understanding</button></nav></aside>
+    <div class="wrap">
+      <div class="lib-mcq-container lib-text lib-question-widget"><div class="lib-mcq-widget-wrapper">
+        <div id="question-statement-1" class="lib-question-statement-container" data-testid="question-statement-c">
+          <span class="lib-html-container lib-html-text lib-has-equation"><span><span class="lib-html-text-wrapper lib-has-equation">${stem}</span></span></span>
+        </div>
+        ${Q.has('bare') ? '' : `<div class="lib-options-container"><div class="lib-options-container-wrapper">
+          <h3 id="question-instruction" class="lib-instruction-label" data-testid="question-instruction">${RADIO ? 'Select the correct answer.' : 'Select the correct answers.'}</h3>
+          <div id="options-group-1" class="lib-options-list-container lib-col--2" role="${RADIO ? 'radiogroup' : 'selectgroup'}">${OPTIONS.map((m, i) => card(i, m)).join('')}</div>
+        </div></div>`}
+      </div></div>
+    </div>
+    <div id="widgets-navigation-container" class="lib-navigation-container" data-testid="navigation-container">
+      <button id="back" type="button">Go Back</button>
+      <div class="lib-navigation-next-skip-wrapper"><button id="submit" class="lib-btn-next" type="submit" disabled>Submit Answer</button></div>
+    </div>`;
+
+  window.__presses = [];       // every press on a card, in order
+  window.__submitted = null;   // the cards that were ticked when Submit went in
+  window.__correct = null;
+  window.__submitPresses = 0;
+
+  const cards = [...document.querySelectorAll('.lib-mcq-option-container')];
+  const submit = document.getElementById('submit');
+  const ticked = () => cards.map((c, i) => (c.getAttribute('aria-checked') === 'true' ? i : -1)).filter(i => i >= 0);
+  const refresh = () => { submit.disabled = ticked().length === 0; };
+
+  const flip = c => {
+    const i = Number(c.dataset.i);
+    const apply = () => {
+      if (RADIO) { for (const k of cards) k.setAttribute('aria-checked', k === c ? 'true' : 'false'); }
+      else c.setAttribute('aria-checked', c.getAttribute('aria-checked') === 'true' ? 'false' : 'true');
+      if (i === STICK) setTimeout(() => { c.setAttribute('aria-checked', 'false'); refresh(); }, 30);
+      refresh();
+    };
+    window.__presses.push(i);
+    LAG ? setTimeout(apply, 300) : apply();
+  };
+
+  for (const c of cards) {
+    c.addEventListener('click', e => {
+      if (INNER && !e.target.closest('button.lib-mcq-icon-container')) return;      // only the button inside ticks it
+      flip(c);
+    });
+  }
+  for (const sw of document.querySelectorAll('header [role=checkbox]')) {
+    sw.addEventListener('click', () => sw.setAttribute('aria-checked', sw.getAttribute('aria-checked') === 'true' ? 'false' : 'true'));
+  }
+
+  const pre = (Q.get('pre') || '').split(',').filter(Boolean).map(Number);
+  for (const i of pre) cards[i].setAttribute('aria-checked', 'true');
+  refresh();
+
+  submit.addEventListener('click', () => {
+    window.__submitPresses++;
+    if (submit.disabled) return;
+    const t = ticked();
+    window.__submitted = t;
+    window.__correct = t.length === RIGHT.length && t.every(i => RIGHT.includes(i));
+    submit.style.display = 'none';
+    const wrap = document.querySelector('.lib-navigation-next-skip-wrapper');
+    const b = document.createElement('button');
+    b.className = 'lib-btn-next'; b.type = 'button';
+    b.textContent = window.__correct ? 'Next' : 'Try Again';
+    wrap.appendChild(b);
+  });
+</script>
+</body>
+</html>

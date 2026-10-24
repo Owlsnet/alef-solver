@@ -1,0 +1,213 @@
+<!doctype html>
+<!-- Drag-and-drop gap fill, modelled on the live item: dashed gaps with an icon
+     inside, in sentences, and a tray of items with a grip — more items than gaps,
+     so some are decoys.
+
+     How an item gets into a gap is the thing the real site hides, so it's switchable:
+       ?mode=pointer   press the item, move, release over a gap
+       ?mode=handle    the same, but only the grip starts a drag, and only after 6px of movement
+       ?mode=html5     draggable items, native drag-and-drop events
+       ?mode=click     click an item, then click a gap
+       ?mode=delay     press and hold: moving before 250ms cancels the drag (dnd-kit's delay constraint)
+       &attrs=dndkit   items are <button>s with the attributes dnd-kit puts on a draggable
+       &zones=…        how the gaps are drawn: dashed (default) | pseudo | bg | plain
+       &hidden=1       gaps carry screen-reader-only text and an SVG title
+       &strict=1       ignore any event the page did not generate itself
+
+     The question sits inside an app shell (a sidebar with a title and a list of
+     question entries) and carries dnd-kit's hidden screen-reader markup, because the
+     live site has both and each of them caused trouble. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alef fixture — drag and drop</title>
+<style>
+  body { margin: 0; font: 16px system-ui; color: #1c2430; background: #fff; }
+  .layout { display: flex; gap: 40px; margin: 70px 0 0 120px; }
+  .left { width: 600px; }
+  h4 { color: #0a6a7a; margin: 0 0 14px; font-size: 14px; }
+  p { margin: 0 0 14px; line-height: 2.6; }
+  .zone { display: inline-block; width: 150px; height: 40px; border: 1.5px dashed #555; border-radius: 6px;
+          vertical-align: middle; margin: 0 4px; box-sizing: border-box; padding: 11px 14px; }
+  .zone svg { width: 16px; height: 16px; fill: #333; }
+  .zone.filled { width: auto; min-width: 110px; border-style: solid; border-color: #6aa0f0; padding: 0 14px; line-height: 37px; }
+  .tray { width: 288px; padding: 12px; background: #e9f1ff; border-radius: 12px; align-self: flex-start; }
+  .item { display: flex; align-items: center; gap: 10px; height: 46px; padding: 0 14px; margin-bottom: 3px;
+          background: #cfe2ff; border: 1px solid #6aa0f0; border-radius: 8px; box-sizing: border-box; cursor: grab; user-select: none; }
+  .item.sel { outline: 2px solid #2f6bff; }
+  .grip { width: 12px; height: 16px; flex: none; fill: #5a7bb5; }
+
+  /* ?zones=… draws the gaps in ways a check for a dashed CSS border cannot see. */
+  .zones-pseudo .zone, .zones-pseudo .zone.filled { border: none; position: relative; }
+  .zones-pseudo .zone::before { content: ''; position: absolute; inset: 0; border: 1.5px dashed #555; border-radius: 6px; pointer-events: none; }
+  .zones-pseudo .zone.filled::before { border-style: solid; border-color: #6aa0f0; }
+  .zones-bg .zone, .zones-bg .zone.filled { border: none;
+    background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='150' height='40'><rect x='1' y='1' width='148' height='38' rx='6' fill='none' stroke='%23555' stroke-width='1.5' stroke-dasharray='5 4'/></svg>") no-repeat; }
+  .zones-plain .zone, .zones-plain .zone.filled { border: none; background: #eef1f7; }
+  .foot { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 24px; display: flex;
+          justify-content: space-between; background: #fff; border-top: 2px solid #e6e9ef; }
+  .foot button { padding: 9px 22px; border-radius: 8px; border: 1px solid #c8ccd6; font: 600 15px system-ui; background: #fff; }
+  .foot #submit { background: #2f6bff; color: #fff; border-color: #2f6bff; }
+  .foot #submit:disabled { background: #d9f0ee; border-color: #d9f0ee; color: #a8cfcb; }
+</style>
+</head>
+<body>
+<div id="root">
+<!-- The live lesson has a sidebar with an always-enabled "Check My Understanding"
+     button, before the question in the DOM. It must never be mistaken for Submit.
+     It also has a title and a list of question entries: real text that precedes the
+     question, which on a page with no radio choices made the whole app look like a
+     reading passage. -->
+<aside style="position:fixed; right:6px; top:70px; width:150px; z-index:5; font-size:12px">
+  <p style="margin:0 0 6px; font-weight:600">Sample Lesson</p>
+  <nav>
+    <button id="side" style="width:100%; padding:8px">Check My Understanding</button>
+  </nav>
+</aside>
+<script>
+  window.__sideClicks = 0;
+  document.getElementById('side').addEventListener('click', () => window.__sideClicks++);
+  document.querySelector('aside nav').insertAdjacentHTML('beforeend',
+    Array.from({ length: 15 }, (_, i) => `<div>Question ${i + 1}</div>`).join(''));
+</script>
+
+<div class="layout">
+  <div class="left">
+    <h4>Drag each item to the correct place.</h4>
+    <p>Rising <span class="zone" data-z="0"></span> create significant pressure on students and their families.</p>
+    <p>Companies <span class="zone" data-z="1"></span> specialists for professionalism and growth. .</p>
+    <p>A clear <span class="zone" data-z="2"></span> can shape a business strategy and move it forward.</p>
+    <!-- What dnd-kit renders beside its children: instructions that are never shown,
+         and a live region (clipped to a pixel, not removed) announcing every drop. -->
+    <div id="DndDescribedBy-0" style="display:none">To pick up a draggable item, press the space bar. While dragging, use the arrow keys to move the item. Press space again to drop the item in its new position, or press escape to cancel.</div>
+    <div id="DndLiveRegion-0" role="status" aria-live="assertive" aria-atomic="true"
+         style="position:fixed; width:1px; height:1px; margin:-1px; border:0; padding:0; overflow:hidden; clip:rect(0 0 0 0); clip-path:inset(100%); white-space:nowrap">Draggable item placed-2 was dropped over droppable area options-pool</div>
+  </div>
+  <div class="tray" id="tray"></div>
+</div>
+<div class="foot"><button id="back">‹ Go Back</button><button id="submit" disabled>Submit Answer ›</button></div>
+</div>
+
+<script>
+  const q = new URLSearchParams(location.search);
+  const MODE = q.get('mode') || 'pointer';
+  const STRICT = q.has('strict');
+  const ATTRS = q.get('attrs') === 'dndkit';
+  if (q.get('zones')) document.body.classList.add('zones-' + q.get('zones'));   // dashed (default) | pseudo | bg | plain
+
+  const ITEMS = ['quantity', 'tuition fees', 'consumerism', 'vision', 'wages', 'hire'];
+  const EXPECTED = ['tuition fees', 'hire', 'vision'];
+
+  window.__filled = [null, null, null];
+  window.__ignored = 0;
+  const ok = e => { if (STRICT && !e.isTrusted) { window.__ignored++; return false; } return true; };
+
+  const ICON = '<svg viewBox="0 0 16 16"><path d="M2 2h8v2H4v8H2zM6 6l8 4-3 1 2 3-1.5 1-2-3-2 2z"/></svg>';
+  // &hidden=1: text only a screen reader would read — an SVG <title>, an aria-label and a
+  // clipped label — none of which a person looking at the page can see in the gap.
+  const HIDDEN = q.has('hidden');
+  document.querySelectorAll('.zone').forEach((z, i) => {
+    z.innerHTML = HIDDEN
+      ? ICON.replace('<svg ', '<svg aria-label="drag handle" ').replace('<path', '<title>Drag an item here</title><path') +
+        `<span style="position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap">Drop zone ${i + 1}</span>`
+      : ICON;
+  });
+
+  const tray = document.getElementById('tray');
+  ITEMS.forEach((word, i) => {
+    const it = document.createElement(ATTRS ? 'button' : 'div');
+    it.className = 'item'; it.dataset.i = i;
+    if (ATTRS) {       // what dnd-kit's useDraggable() puts on the node
+      it.type = 'button'; it.setAttribute('role', 'button'); it.tabIndex = 0;
+      it.setAttribute('aria-roledescription', 'draggable'); it.setAttribute('aria-describedby', 'DndDescribedBy-0');
+    }
+    it.innerHTML = '<svg class="grip" viewBox="0 0 12 16"><circle cx="3" cy="3" r="1.4"/><circle cx="9" cy="3" r="1.4"/><circle cx="3" cy="8" r="1.4"/><circle cx="9" cy="8" r="1.4"/><circle cx="3" cy="13" r="1.4"/><circle cx="9" cy="13" r="1.4"/></svg>'
+                 + `<span>${word}</span>`;
+    if (MODE === 'html5') it.draggable = true;
+    tray.appendChild(it);
+  });
+
+  function place(i, z) {
+    const zone = document.querySelector(`.zone[data-z="${z}"]`);
+    const item = tray.querySelector(`.item[data-i="${i}"]`);
+    if (!zone || !item || zone.classList.contains('filled')) return;
+    window.__filled[z] = ITEMS[i];
+    item.remove();                                           // the tray closes up
+    zone.classList.add('filled');
+    zone.textContent = ITEMS[i];
+    document.getElementById('submit').disabled = window.__filled.some(v => v == null);
+  }
+
+  const zoneAt = e => {
+    const hit = document.elementFromPoint(e.clientX, e.clientY);
+    const zone = hit && hit.closest('.zone:not(.filled)');
+    return zone ? Number(zone.dataset.z) : null;
+  };
+
+  if (MODE === 'pointer' || MODE === 'handle' || MODE === 'delay') {
+    let drag = null;
+    tray.addEventListener('pointerdown', e => {
+      if (!ok(e)) return;
+      const item = e.target.closest('.item');
+      if (!item) return;
+      if (MODE === 'handle' && !e.target.closest('.grip')) return;   // only the grip starts a drag
+      drag = { i: Number(item.dataset.i), x: e.clientX, y: e.clientY, moved: false, t0: performance.now() };
+    });
+    document.addEventListener('pointermove', e => {
+      if (!drag) return;
+      const dist = Math.hypot(e.clientX - drag.x, e.clientY - drag.y);
+      if (MODE === 'delay' && performance.now() - drag.t0 < 250) {
+        if (dist > 5) drag = null;       // moved before the hold finished: the drag is cancelled
+        return;
+      }
+      if (dist >= (MODE === 'handle' ? 6 : 1)) drag.moved = true;
+    });
+    document.addEventListener('pointerup', e => {
+      if (!drag) return;
+      const z = zoneAt(e);
+      if (drag.moved && z != null) place(drag.i, z);
+      drag = null;
+    });
+  }
+
+  if (MODE === 'html5') {
+    tray.addEventListener('dragstart', e => {
+      if (!ok(e)) { e.preventDefault(); return; }
+      e.dataTransfer.setData('text/plain', e.target.closest('.item').dataset.i);
+    });
+    document.querySelectorAll('.zone').forEach(zone => {
+      zone.addEventListener('dragover', e => e.preventDefault());
+      zone.addEventListener('drop', e => {
+        e.preventDefault();
+        const i = e.dataTransfer.getData('text/plain');
+        if (i !== '') place(Number(i), Number(zone.dataset.z));
+      });
+    });
+  }
+
+  if (MODE === 'click') {
+    let sel = null;
+    tray.addEventListener('click', e => {
+      if (!ok(e)) return;
+      const item = e.target.closest('.item');
+      if (!item) return;
+      sel = Number(item.dataset.i);
+      tray.querySelectorAll('.item').forEach(x => x.classList.toggle('sel', x === item));
+    });
+    document.querySelectorAll('.zone').forEach(zone => zone.addEventListener('click', e => {
+      if (!ok(e) || sel == null) return;
+      place(sel, Number(zone.dataset.z)); sel = null;
+    }));
+  }
+
+  document.getElementById('submit').addEventListener('click', e => {
+    const b = e.currentTarget;
+    if (b.disabled || !ok(e)) return;
+    window.__dragSubmitted = true;
+    window.__dragCorrect = window.__filled.every((w, i) => w === EXPECTED[i]);
+    b.textContent = window.__dragCorrect ? 'Correct' : 'Incorrect';
+    b.disabled = true;
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,109 @@
+<!doctype html>
+<!-- Synthetic stand-in for the live site's picture-choice question ("Which of the following graphs…"):
+     four answer cards, each a role=radio holding the picture and a magnifier button ("Zoom In") that
+     opens a viewer. Modelled on what the live page's dump showed. It reproduces what went wrong: the
+     first button in a card is the magnifier, and while the viewer is open a press on Submit is lost.
+
+     ?swallow=1   a press on Submit changes something on the page but does not take the answer
+                  (a stand-in for anything on the page moving at that moment)
+     ?inner=1     the card's own box has no handler; only the picture area inside it does (an event
+                  aimed at the box never reaches it; a press where a person's lands does)
+     ?keys=1      the card only answers Space / Enter on it
+     ?dead=1      nothing on the card answers anything
+     ?armed=1     Submit is already enabled when the page opens (left over from an earlier answer)
+     ?zoomcenter=1  the magnifier sits at the very middle of each card, where a press lands first -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alef fixture — picture choices</title>
+<style>
+  body { margin: 0; font: 16px system-ui; color: #1c2430; background: #fff; }
+  .lib-options-list-container { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; width: 900px; margin: 140px 0 0 120px; }
+  .lib-mcq-option-container { position: relative; height: 110px; border: 1px solid #556; border-radius: 6px; padding: 8px; box-sizing: border-box; cursor: pointer; }
+  .lib-mcq-option-container[aria-checked="true"] { border-color: #2a7bff; background: #eef4ff; }
+  .mark { position: absolute; left: 8px; top: 8px; width: 18px; height: 18px; border-radius: 50%; border: 2px solid #99a; }
+  [aria-checked="true"] .mark { background: #2a7bff; }
+  .lib-btn-img-zoom { position: absolute; right: 8px; bottom: 8px; width: 32px; height: 32px; }
+  .zc .lib-btn-img-zoom { right: auto; bottom: auto; left: calc(50% - 16px); top: calc(50% - 16px); }
+  .pic { display: block; width: 120px; margin: 0 auto; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .lib-navigation-container { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 24px; display: flex; justify-content: space-between; background: #fff; border-top: 2px solid #e6e9ef; }
+  .lib-navigation-container button { padding: 10px 22px; border-radius: 8px; border: 1px solid #c8ccd6; font: 600 15px system-ui; background: #2f6bff; color: #fff; }
+  .lib-navigation-container button:disabled { background: #d9f0ee; color: #a8cfcb; opacity: .4; }
+  .zoom-modal { position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 50; display: none; align-items: center; justify-content: center; }
+  .zoom-modal.open { display: flex; }
+  .zoom-modal .box { background: #fff; padding: 24px; border-radius: 10px; }
+</style>
+</head>
+<body>
+<h3 style="margin:30px 0 0 120px">Which of the following graphs fits the end behavior described below?</h3>
+<p style="margin:6px 0 0 120px">As x → ∞, f(x) → ∞ and x → −∞, f(x) → −∞.</p>
+<h4 style="margin:24px 0 0 120px; color:#0a6a7a">Select the correct answer.</h4>
+
+<div class="lib-mcq-container lib-imageText lib-question-widget"><div class="lib-mcq-widget-wrapper"><div class="lib-options-container"><div class="lib-options-container-wrapper">
+  <div id="options-group" class="lib-options-list-container lib-col--4" role="radiogroup">
+    <div class="lib-mcq-option-container" role="radio" aria-checked="false" tabindex="0" data-i="0"><span class="mark"></span><span class="sr">MCQOption 1: Image content</span><span class="pic"><img alt="" width="120" height="80" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='80'%3E%3Cpath d='M10 70 L60 10 L110 70' stroke='crimson' fill='none'/%3E%3C/svg%3E"></span><button class="lib-btn-img-zoom" aria-label="Zoom In" type="button">🔍</button></div>
+    <div class="lib-mcq-option-container" role="radio" aria-checked="false" tabindex="0" data-i="1"><span class="mark"></span><span class="sr">MCQOption 2: Image content</span><span class="pic"><img alt="" width="120" height="80" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='80'%3E%3Cpath d='M10 10 L60 70 L110 10' stroke='crimson' fill='none'/%3E%3C/svg%3E"></span><button class="lib-btn-img-zoom" aria-label="Zoom In" type="button">🔍</button></div>
+    <div class="lib-mcq-option-container" role="radio" aria-checked="false" tabindex="0" data-i="2"><span class="mark"></span><span class="sr">MCQOption 3: Image content</span><span class="pic"><img alt="" width="120" height="80" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='80'%3E%3Cpath d='M10 70 L110 10' stroke='crimson' fill='none'/%3E%3C/svg%3E"></span><button class="lib-btn-img-zoom" aria-label="Zoom In" type="button">🔍</button></div>
+    <div class="lib-mcq-option-container" role="radio" aria-checked="false" tabindex="0" data-i="3"><span class="mark"></span><span class="sr">MCQOption 4: Image content</span><span class="pic"><img alt="" width="120" height="80" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='80'%3E%3Cpath d='M10 10 L110 70' stroke='crimson' fill='none'/%3E%3C/svg%3E"></span><button class="lib-btn-img-zoom" aria-label="Zoom In" type="button">🔍</button></div>
+  </div>
+</div></div></div></div>
+
+<div class="zoom-modal" id="zoom" role="dialog" aria-label="Image preview" aria-modal="true">
+  <div class="box"><button class="close" id="zoomClose" aria-label="Close" type="button">✕</button><p>(the picture, enlarged)</p></div>
+</div>
+
+<div id="widgets-navigation-container" class="lib-navigation-container" data-testid="navigation-container">
+  <button id="back" type="button">Go Back</button>
+  <div class="lib-navigation-next-skip-wrapper"><button id="submit" class="lib-btn-next" type="submit" disabled>Submit Answer</button></div>
+</div>
+
+<script>
+  const SWALLOW = new URLSearchParams(location.search).get('swallow') === '1';
+  window.__zoomClicks = 0; window.__selection = -1; window.__graded = false; window.__submitPresses = 0;
+  const submit = document.getElementById('submit');
+  const zoom = document.getElementById('zoom');
+  const closeZoom = () => zoom.classList.remove('open');
+
+  const Q = new URLSearchParams(location.search);
+  const INNER = Q.get('inner') === '1', KEYS = Q.get('keys') === '1', DEAD = Q.get('dead') === '1';
+  window.__cardPresses = 0;
+  for (const card of document.querySelectorAll('.lib-mcq-option-container')) {
+    const choose = () => {
+      for (const c of document.querySelectorAll('.lib-mcq-option-container')) c.setAttribute('aria-checked', c === card ? 'true' : 'false');
+      window.__selection = Number(card.dataset.i);
+      submit.disabled = false;
+    };
+    const onClick = e => {
+      window.__cardPresses++;
+      if (e.target.closest('.lib-btn-img-zoom')) return;                  // the magnifier does not choose
+      choose();
+    };
+    if (INNER) card.querySelector('.pic').addEventListener('click', onClick);
+    else if (!KEYS && !DEAD) card.addEventListener('click', onClick);
+    if (KEYS) card.addEventListener('keydown', e => { if (e.key === ' ' || e.key === 'Enter') choose(); });
+    card.querySelector('.lib-btn-img-zoom').addEventListener('click', e => {
+      e.stopPropagation();
+      window.__zoomClicks++;
+      zoom.classList.add('open');
+    });
+  }
+  if (Q.get('armed') === '1') submit.disabled = false;          // Submit already enabled, left over from an earlier answer
+  if (Q.get('zoomcenter') === '1') document.body.classList.add('zc');
+  document.getElementById('zoomClose').addEventListener('click', closeZoom);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeZoom(); });
+
+  submit.addEventListener('click', () => {
+    window.__submitPresses++;
+    if (zoom.classList.contains('open')) return;                          // the viewer has the page: the press is lost
+    if (SWALLOW) { submit.classList.add('pressed'); return; }             // something moved, but nothing was taken
+    if (submit.disabled) return;
+    window.__graded = true;
+    submit.style.display = 'none';
+    const next = document.createElement('button');
+    next.id = 'next'; next.className = 'lib-btn-next'; next.type = 'button'; next.textContent = 'Next';
+    document.querySelector('.lib-navigation-next-skip-wrapper').appendChild(next);
+  });
+</script>
+</body>
+</html>

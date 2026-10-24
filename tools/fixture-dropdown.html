@@ -1,0 +1,164 @@
+<!doctype html>
+<!-- Drop-down cloze, modelled on the live item: a paragraph with three "Select…"
+     boxes inline, instructions above, Need Help? and a Go Back / Submit Answer
+     bar outside the card.
+
+     ?mode=aria    custom menu in a portal, options carry role=option (default)
+     ?mode=plain   custom menu in a portal, plain <div>s, handler on an inner span
+     ?mode=native  real <select> elements
+     &strict=1     page ignores any event it did not generate itself -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alef fixture — drop-downs</title>
+<style>
+  body { margin: 0; font: 16px/1.6 system-ui; color: #1c2430; }
+  .top { text-align: right; padding: 14px 90px; }
+  .top button { border: 0; background: none; font: 14px system-ui; color: #555; }
+  .card { margin: 10px 72px; max-width: 900px; }
+  h2 { font-size: 20px; margin: 6px 0 14px; }
+  .inst { color: #0a7a8a; font-weight: 600; font-size: 14px; margin: 0 0 14px; }
+  .para { margin: 0; line-height: 2.4; }
+  .dd { display: inline-flex; align-items: center; gap: 10px; width: 116px; padding: 4px 10px;
+        border: 1px solid #c8ccd6; border-radius: 8px; background: #f7f8fb; cursor: pointer;
+        vertical-align: middle; color: #8b93a5; }
+  .dd.filled { width: auto; color: #1c2430; }
+  .dd .lbl { flex: 1; }
+  .dd svg { width: 12px; height: 12px; fill: #46506a; }
+  select { font: 16px system-ui; padding: 4px 8px; border: 1px solid #c8ccd6; border-radius: 8px; }
+  .menu { position: absolute; background: #fff; border: 1px solid #c8ccd6; border-radius: 8px;
+          box-shadow: 0 6px 20px rgba(0,0,0,.15); min-width: 160px; z-index: 50; }
+  .opt { padding: 8px 14px; cursor: pointer; }
+  .opt:hover { background: #eef2ff; }
+  .foot { position: fixed; left: 0; right: 0; bottom: 0; padding: 14px 72px;
+          display: flex; justify-content: space-between; background: #fff; border-top: 1px solid #e6e9ef; }
+  .foot button { padding: 9px 22px; border-radius: 8px; border: 1px solid #c8ccd6; font: 600 15px system-ui; background: #fff; }
+  .foot #submit { background: #2f6bff; color: #fff; border-color: #2f6bff; }
+  .foot #submit:disabled { background: #cfd6e6; border-color: #cfd6e6; }
+</style>
+</head>
+<body>
+<!-- The live lesson has a sidebar with an always-enabled "Check My Understanding"
+     button, before the question in the DOM. It must never be mistaken for Submit. -->
+<aside style="position:fixed; right:6px; top:70px; width:150px; z-index:5"><nav>
+  <button id="side" style="width:100%; padding:8px">Check My Understanding</button>
+</nav></aside>
+<script>window.__sideClicks = 0; document.getElementById('side').addEventListener('click', () => window.__sideClicks++);</script>
+<div class="top"><button id="help">Need Help? 💡</button></div>
+
+<div class="card">
+  <h2>Complete the paragraph using precise language to connect and interpret the employment figures.</h2>
+  <p class="inst">Choose the correct option from the drop-down list.</p>
+  <p class="para" id="para"></p>
+</div>
+
+<div class="foot">
+  <button id="back">‹ Go Back</button>
+  <button id="submit" disabled>Submit Answer ›</button>
+</div>
+
+<script>
+  const q = new URLSearchParams(location.search);
+  const MODE = q.get('mode') || 'aria';
+  const STRICT = q.has('strict');
+
+  const MENUS = [
+    ['exceeded', 'matched', 'trailed'],
+    ['whereas', 'so that', 'unless'],
+    ['Overall', 'However', 'For instance'],
+  ];
+  const EXPECTED = ['exceeded', 'whereas', 'Overall'];
+  const PARTS = [
+    'Technology’s 10-point rise ', 0,
+    ' tourism’s 8-point increase. Construction fell by 6 points; ', 1,
+    ', energy fell by 3 points. ', 2,
+    ', technology had the greatest overall change.',
+  ];
+
+  window.__sel = [null, null, null];
+  window.__ignored = 0;
+  let openMenu = null;                      // { i, el }
+
+  const trusted = e => { if (STRICT && !e.isTrusted) { window.__ignored++; return false; } return true; };
+
+  function refresh() {
+    document.getElementById('submit').disabled = window.__sel.some(v => v == null);
+  }
+  function choose(i, text, box) {
+    window.__sel[i] = text;
+    if (box) { box.querySelector('.lbl').textContent = text; box.classList.add('filled'); }
+    refresh();
+  }
+  function closeMenu() { if (openMenu) { openMenu.el.remove(); openMenu = null; } }
+
+  function open(i, box, e) {
+    if (!trusted(e)) return;
+    const same = openMenu && openMenu.i === i;
+    closeMenu();
+    if (same) return;
+
+    const m = document.createElement('div');
+    m.className = 'menu';
+    const r = box.getBoundingClientRect();
+    m.style.left = (r.left + scrollX) + 'px';
+    m.style.top = (r.bottom + scrollY + 4) + 'px';
+    for (const text of MENUS[i]) {
+      const o = document.createElement('div');
+      o.className = 'opt';
+      if (MODE === 'aria') o.setAttribute('role', 'option');
+      const s = document.createElement('span');
+      s.textContent = text;
+      o.appendChild(s);
+      o.addEventListener('click', ev => { if (!trusted(ev)) return; choose(i, text, box); closeMenu(); });
+      m.appendChild(o);
+    }
+    document.body.appendChild(m);
+    openMenu = { i, el: m };
+  }
+
+  const para = document.getElementById('para');
+  for (const part of PARTS) {
+    if (typeof part === 'string') { para.appendChild(document.createTextNode(part)); continue; }
+    const i = part;
+
+    if (MODE === 'native') {
+      const sel = document.createElement('select');
+      for (const text of ['Select…', ...MENUS[i]]) {
+        const o = document.createElement('option');
+        o.value = text === 'Select…' ? '' : text;
+        o.textContent = text;
+        sel.appendChild(o);
+      }
+      sel.addEventListener('change', () => choose(i, sel.value || null));
+      para.appendChild(sel);
+      continue;
+    }
+
+    const box = document.createElement('div');
+    box.className = 'dd';
+    if (MODE === 'aria') { box.setAttribute('role', 'combobox'); box.setAttribute('aria-haspopup', 'listbox'); }
+    box.innerHTML = '<span class="lbl">Select…</span><svg viewBox="0 0 12 12"><path d="M1 3h10L6 9z"/></svg>';
+    // aria: the handler is on the box. plain: only on the inner label, so an
+    // event aimed at the wrapper would never reach it.
+    (MODE === 'plain' ? box.querySelector('.lbl') : box).addEventListener('click', e => open(i, box, e));
+    para.appendChild(box);
+  }
+
+  document.addEventListener('pointerdown', e => {
+    if (!openMenu) return;
+    if (openMenu.el.contains(e.target) || e.target.closest('.dd')) return;
+    closeMenu();
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenu(); });
+
+  document.getElementById('submit').addEventListener('click', e => {
+    const b = e.currentTarget;
+    if (b.disabled || !trusted(e)) return;
+    window.__ddSubmitted = true;
+    window.__ddCorrect = JSON.stringify(window.__sel) === JSON.stringify(EXPECTED);
+    b.textContent = window.__ddCorrect ? 'Correct' : 'Incorrect';
+    b.disabled = true;
+  });
+</script>
+</body>
+</html>
