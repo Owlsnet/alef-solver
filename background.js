@@ -24,6 +24,10 @@ const DEFAULTS = {
   deepseekThinking: false,         // DeepThink
   deepseekSearch: false,           // the site's own web search
   deepseekPowRound: null,          // which proof-of-work digest last answered: 1 (round 0 dropped) or 0
+  geminiWebModel: '',              // '' is the account's own default model: no model header is sent at all
+  geminiWebFallbackModel: '',
+  geminiWebThinking: false,        // the site's extended thinking
+  geminiWebModels: [],             // the models the site says this account may use, as discovered
   autoSubmit: true,
   openPassage: true,
   screenshot: 'auto', // 'auto' | 'always' | 'never'
@@ -740,6 +744,195 @@ async function deepseekComplete(cfg, body, model, thinkingOff) {
   };
 }
 
+/* ------------------------------------------------- Gemini, on the site itself */
+
+/**
+ * The Gemini web app, driven with your own signed-in Google session instead of a bought key.
+ *
+ * Almost none of this runs here. The requests are made by gemini-web.js inside a
+ * gemini.google.com tab, for a reason that is not a preference: the session cookie is
+ * SameSite=Lax, so a service worker — a different origin — would send its requests signed out,
+ * and for accounts with Device Bound Session Credentials switched on the proof-of-possession
+ * that proves the cookie is really yours is added by the browser's network stack and cannot be
+ * produced from here at all. Copying the cookies out and replaying them fails for the same
+ * reason, and increasingly quickly: that is exactly what the binding exists to stop.
+ *
+ * So this side decides what to ask and how to read the answer, and the tab does the talking.
+ */
+
+/** Is any gemini.google.com tab open and listening? Answers with the tab, or null. */
+async function gwTab() {
+  let tabs = [];
+  try { tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' }); } catch { return null; }
+  for (const tab of tabs) {
+    if (tab.id == null) continue;
+    try {
+      const r = await chrome.tabs.sendMessage(tab.id, { type: 'gw-ping' });
+      if (r?.ok) return tab;
+    } catch { /* no listener in that tab: it is old, or still loading */ }
+  }
+  return null;
+}
+
+/** Ask that tab to do something, and say plainly what to do when there is no tab. */
+async function gwCall(tabId, msg) {
+  try {
+    const r = await chrome.tabs.sendMessage(tabId, msg);
+    if (!r) throw new Error('no reply');
+    return r;
+  } catch (e) {
+    throw new Error(`lost contact with the Gemini tab (${e.message || e}) — reload it and try again`);
+  }
+}
+
+/** Send a picture to the site's upload endpoint and hand back the address it returns, which is
+ *  what a chat request refers to an attachment by.
+ *
+ *  This one does run here rather than in the tab. The upload endpoint is a different host and
+ *  takes no part of the login, so it needs none of what the tab is for — and a content script
+ *  gets no cross-origin exemption from host permissions the way a service worker does, so from
+ *  the page this request would be refused by CORS before it was ever sent. Unlike DeepSeek,
+ *  the site does read pictures, so this path is worth having. */
+async function gwUpload(dataUrl, pushId) {
+  const m = /^data:([^;,]+)?(;base64)?,(.*)$/.exec(String(dataUrl || ''));
+  if (!m) return { ok: false, detail: 'the picture was not in a form that can be sent' };
+
+  const type = m[1] || 'image/jpeg';
+  const bytes = m[2]
+    ? Uint8Array.from(atob(m[3]), ch => ch.charCodeAt(0))
+    : new TextEncoder().encode(decodeURIComponent(m[3]));
+
+  const ext = (type.split('/')[1] || 'jpg').replace(/[^a-z0-9]/gi, '') || 'jpg';
+  const name = `input_${Math.floor(1000000 + Math.random() * 8999999)}.${ext}`;
+
+  const form = new FormData();
+  form.append('file', new Blob([bytes], { type }), name);
+
+  let res;
+  try {
+    res = await fetch('https://content-push.googleapis.com/upload', {
+      method: 'POST',
+      headers: { 'push-id': pushId || 'feeds/mcudyrk2a4khkz', 'x-tenant-id': 'bard-storage' },
+      body: form,
+    });
+  } catch (e) {
+    return { ok: false, detail: `the picture could not be sent (${e.message || e})` };
+  }
+  if (!res.ok) return { ok: false, detail: `the site refused the picture (HTTP ${res.status})` };
+  const url = (await res.text()).trim();
+  if (!url) return { ok: false, detail: 'the site took the picture but returned no address' };
+  return { ok: true, url, name };
+}
+
+/** The session, the model list, and the answer — all inside the tab. */
+async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
+  const tab = await gwTab();
+  if (!tab) {
+    throw new Error('open gemini.google.com in a tab, signed in, and leave it open — the extension borrows that tab because the login only works from there');
+  }
+
+  const init = await gwCall(tab.id, { type: 'gw-init' });
+  if (!init.ok) throw new Error(init.detail || 'the Gemini page gave no session');
+  const session = init.session;
+
+  const found = await gwCall(tab.id, { type: 'gw-models', session });
+  if (!found.ok) throw new Error(found.detail || 'the model list could not be read');
+
+  // A saved list is kept so Options can offer the account's real models without asking again.
+  const models = (found.models || []).map(m => ({ ...m, ...found.capacity }));
+  if (models.length && JSON.stringify(models) !== JSON.stringify(cfg.geminiWebModels || [])) {
+    try { await chrome.storage.local.set({ geminiWebModels: models }); } catch { /* only a cache */ }
+  }
+
+  // An empty model box means the account's own default, which the site picks when no model
+  // header is sent. That is the safest choice: it is always available to every account.
+  const wanted = String(modelName || '').trim().toLowerCase();
+  const model = wanted
+    ? models.find(m => m.name.toLowerCase() === wanted || m.label.toLowerCase() === wanted || m.id.toLowerCase() === wanted)
+      || models.find(m => m.name.toLowerCase().includes(wanted) || wanted.includes(m.name.toLowerCase()))
+    : null;
+
+  if (wanted && !model) {
+    return { ok: false, status: 400, text: async () => JSON.stringify({
+      error: { message: `this account has no model called ${modelName}; Options lists the ones it has` } }) };
+  }
+
+  const user = body.messages[1];
+  // The site takes one prompt and its own pictures: the system prompt is put on top of the user's text.
+  const prompt = [body.messages[0].content, '', ...user.content.filter(c => c.type === 'text').map(c => c.text)].join('\n');
+
+  // A picture is uploaded to the site first and referenced by the address it hands back; the
+  // site's own chat reads images, so unlike DeepSeek these are not thrown away.
+  let fileData = null;
+  const shot = user.content.find(c => c.type === 'image_url')?.image_url?.url;
+  if (shot) {
+    const up = await gwUpload(shot, session.push);
+    if (!up.ok) {
+      return { ok: false, status: 400, text: async () => JSON.stringify({
+        error: { message: `the image could not be attached: ${up.detail || 'unknown reason'}` } }) };
+    }
+    fileData = [[[up.url], up.name]];
+  }
+
+  const out = await gwCall(tab.id, {
+    type: 'gw-generate',
+    session,
+    prompt,
+    model,
+    extendedThinking: !!(cfg.geminiWebThinking && !thinkingOff),
+    fileData,
+  });
+  if (!out.ok) {
+    return { ok: false, status: out.status || 502, text: async () => JSON.stringify({
+      error: { message: out.detail || 'the Gemini page refused the request' } }) };
+  }
+  if (out.failure) {
+    return { ok: false, status: 429, text: async () => JSON.stringify({ error: { message: out.failure } }) };
+  }
+
+  const finish = out.done ? 'stop' : 'length';
+  return {
+    ok: true,
+    status: 200,
+    text: async () => out.text,
+    json: async () => ({ choices: [{ message: { content: out.text }, finish_reason: finish }] }),
+  };
+}
+
+/** Options' "Test key" for this provider: prove the tab, the login and the model list work,
+ *  without asking the model anything. */
+async function geminiWebSelfTest() {
+  let tab;
+  try { tab = await gwTab(); } catch (e) { return { error: String(e.message || e) }; }
+  if (!tab) {
+    return { error: 'No signed-in gemini.google.com tab is open. Open one, sign in, and leave it open, then try again.' };
+  }
+  let init;
+  try { init = await gwCall(tab.id, { type: 'gw-init' }); } catch (e) { return { error: String(e.message || e) }; }
+  if (!init.ok) return { error: init.detail || 'the page gave no session' };
+
+  let found;
+  try { found = await gwCall(tab.id, { type: 'gw-models', session: init.session }); } catch (e) { return { error: String(e.message || e) }; }
+  if (!found.ok) return { error: found.detail || 'the model list could not be read' };
+
+  const models = (found.models || []).map(m => ({ ...m, ...found.capacity }));
+  if (models.length || String(found.status) === '1000') {
+    try { await chrome.storage.local.set({ geminiWebModels: models }); } catch { /* only a cache */ }
+  }
+
+  // The status codes the site uses for "this account is not actually usable" — the login can be
+  // live and the account still be barred, so this is worth saying rather than reporting success.
+  const trouble = { 1016: 'the session is not signed in any more', 1014: 'access is restricted for this session',
+                    1021: 'this account is not allowed', 1033: 'the account did not pass a safety check',
+                    1040: 'a new terms of service has to be accepted on the site', 1042: 'the terms of service are out of date',
+                    1054: 'a parent or guardian has blocked access', 1057: 'a parent or guardian must approve access',
+                    1060: 'Gemini is not available in this country' }[found.status];
+  if (trouble) return { error: `the login works, but ${trouble} — open gemini.google.com and sort that out` };
+
+  if (!models.length) return { error: 'the login works, but no models came back — the site has probably changed' };
+  return { ok: true, note: `Signed in. ${models.length} model${models.length === 1 ? '' : 's'} available: ${models.map(m => m.label || m.name).join(', ')}.` };
+}
+
 /* --------------------------------------------------------------- parsing */
 
 /** Parse a fill-in-the-blank reply: an array of words, one per blank. */
@@ -922,19 +1115,25 @@ async function ask(payload) {
   const gemini = cfg.provider === 'gemini';
   const openai = cfg.provider === 'openai';
   const deepseek = cfg.provider === 'deepseek';
+  const gweb = cfg.provider === 'gemini-web';
   const missing = gemini ? 'No Gemini API key set — open the extension Options and paste one.'
                 : openai ? 'No OpenAI API key set — open the extension Options and paste one.'
                 : deepseek ? 'No DeepSeek token set — open Options and press “Copy token from the site”.'
+                : gweb ? 'No signed-in gemini.google.com tab is open — open one and leave it open.'
                 : 'No API key set — open the extension Options and paste one.';
-  if (gemini ? !cfg.geminiKey : openai ? !cfg.openaiKey : deepseek ? !cfg.deepseekToken : !cfg.apiKey) {
+  if (gemini ? !cfg.geminiKey : openai ? !cfg.openaiKey : deepseek ? !cfg.deepseekToken : gweb ? false : !cfg.apiKey) {
     return { error: missing };
   }
 
-  // A model box saved empty means "the default", not "no model to ask".
+  // A model box saved empty means "the default", not "no model to ask". For the site itself an
+  // empty box is a real choice — it means the account's own default model, which the site picks
+  // when no model header is sent, and which every account has.
   const chain = (gemini ? [cfg.geminiModel || DEFAULTS.geminiModel, cfg.geminiFallbackModel]
                : openai ? [cfg.openaiModel || DEFAULTS.openaiModel, cfg.openaiFallbackModel]
                : deepseek ? [cfg.deepseekModel || DEFAULTS.deepseekModel, cfg.deepseekFallbackModel]
+               : gweb ? [cfg.geminiWebModel, cfg.geminiWebFallbackModel].filter(Boolean)
                : [cfg.model, cfg.fallbackModel]).filter(Boolean);
+  if (gweb && !chain.length) chain.push('');   // the account's own default
   const oa = {};                 // OpenAI only: what a model has turned out not to accept (see toOpenAI)
   // DeepSeek's chat takes text only, so the picture is dropped here rather than failing a
   // request with it. The question text then says the figure could not be attached.
@@ -961,6 +1160,7 @@ async function ask(payload) {
       });
     }
     if (deepseek) return deepseekComplete(cfg, body, model, thinking === 'off' || thinking === 'low');
+    if (gweb) return geminiWebComplete(cfg, body, model, thinking === 'off' || thinking === 'low');
     const reqBody = { ...body, model };
     if (structured) reqBody.response_format = { type: 'json_object' };
     // OpenRouter's own settings; a model with no thinking to adjust ignores them.
@@ -1001,11 +1201,14 @@ async function ask(payload) {
    *  model), 'again' (try the next way of asking this one) or 'stop' (give up
    *  altogether: the key is refused, and every model would be). */
   const attempt = async (model, structured) => {
+    // The Gemini-site provider treats an empty model box as a real choice — the account's own
+    // default — so its messages say that rather than starting with a bare colon.
+    const named = model || (gweb ? 'the account\'s default model' : model);
     let res;
     try {
       res = await post(model, structured);
     } catch (e) {
-      return { error: `${model}: ${e}`, then: 'network' };   // network is down, another model won't help
+      return { error: `${named}: ${e}`, then: 'network' };   // network is down, another model won't help
     }
 
     if (!res.ok) {
@@ -1015,30 +1218,39 @@ async function ask(payload) {
       // another model or another way of asking will be refused the same way, so stop here and
       // say what to check.
       if (gemini && (res.status === 401 || res.status === 403 || /API_KEY_INVALID|API key not valid/i.test(detail))) {
-        return { error: `${model}: Gemini refused the request (HTTP ${res.status}) — check the key in Options. ${detail.slice(0, 160)}`, then: 'stop' };
+        return { error: `${named}: Gemini refused the request (HTTP ${res.status}) — check the key in Options. ${detail.slice(0, 160)}`, then: 'stop' };
       }
 
       // OpenAI says a wrong key as a 401. Every model would be refused the same way: stop, and say what to check.
       if (openai && (res.status === 401 || /invalid_api_key|Incorrect API key/i.test(detail))) {
-        return { error: `${model}: OpenAI refused the key (HTTP ${res.status}) — check it in Options. ${detail.slice(0, 160)}`, then: 'stop' };
+        return { error: `${named}: OpenAI refused the key (HTTP ${res.status}) — check it in Options. ${detail.slice(0, 160)}`, then: 'stop' };
       }
 
       // DeepSeek refuses a stale or wrong token the same way whatever the model: stop, and say
       // how to fix it rather than burning the whole chain on it.
       if (deepseek && (res.status === 401 || res.status === 403 || /invalid|expired|unauthor/i.test(detail))) {
-        return { error: `${model}: DeepSeek refused the token (HTTP ${res.status}) — open the site, sign in, and press “Copy token from the site” in Options. ${detail.slice(0, 120)}`, then: 'stop' };
+        return { error: `${named}: DeepSeek refused the token (HTTP ${res.status}) — open the site, sign in, and press “Copy token from the site” in Options. ${detail.slice(0, 120)}`, then: 'stop' };
       }
 
       // The site throttles by account, not by model: a second model would be refused too.
       if (deepseek && res.status === 429) {
-        return { error: `${model}: DeepSeek is rate-limiting this account (HTTP 429) — wait a moment and try again. ${detail.slice(0, 120)}`, then: 'stop' };
+        return { error: `${named}: DeepSeek is rate-limiting this account (HTTP 429) — wait a moment and try again. ${detail.slice(0, 120)}`, then: 'stop' };
+      }
+
+      // The Gemini site says the same thing about the account whatever model is named, so there
+      // is no point walking the chain: stop and say which of the two usual causes it is.
+      if (gweb && (res.status === 401 || res.status === 403 || /not signed in|no session token/i.test(detail))) {
+        return { error: `${named}: gemini.google.com would not accept the session (HTTP ${res.status}) — open the site, sign in, and reload the tab. ${detail.slice(0, 140)}`, then: 'stop' };
+      }
+      if (gweb && res.status === 429) {
+        return { error: `${named}: the Gemini site is limiting this account (HTTP 429) — wait a while and try again, or pick another service. ${detail.slice(0, 140)}`, then: 'stop' };
       }
 
       // OpenRouter was told to switch thinking off and the model will not have it (some think whether asked
       // or not): ask for less of it instead.
       if (!gemini && !openai && thinking === 'off' && res.status === 400 && /reasoning/i.test(detail)) {
         thinking = 'low';
-        errors.push(`${model}: cannot switch thinking off — asked for less of it`);
+        errors.push(`${named}: cannot switch thinking off — asked for less of it`);
         return attempt(model, structured);
       }
 
@@ -1046,12 +1258,12 @@ async function ask(payload) {
       // want max_tokens. The first answer is a 400 naming the thing; ask again the other way, once each.
       if (openai && res.status === 400 && /temperature/i.test(detail) && !oa.noTemperature) {
         oa.noTemperature = true;
-        errors.push(`${model}: takes no temperature — asked without`);
+        errors.push(`${named}: takes no temperature — asked without`);
         return attempt(model, structured);
       }
       if (openai && res.status === 400 && /max_completion_tokens/i.test(detail) && !oa.legacyTokens) {
         oa.legacyTokens = true;
-        errors.push(`${model}: takes max_tokens, not max_completion_tokens — asked that way`);
+        errors.push(`${named}: takes max_tokens, not max_completion_tokens — asked that way`);
         return attempt(model, structured);
       }
 
@@ -1061,20 +1273,20 @@ async function ask(payload) {
       // none can does the question go out without it (below).
       if (hasImages(body) && NO_VISION.test(detail)) {
         blind.add(model);
-        return { error: `${model}: cannot read pictures (HTTP ${res.status})`, then: 'model' };
+        return { error: `${named}: cannot read pictures (HTTP ${res.status})`, then: 'model' };
       }
 
       // A picture the provider can't fetch or read — a 401 on an image URL, an
       // unsupported format — must not cost the answer. Send the same request
       // without any images; the prompt then says the figure couldn't be attached.
       if (res.status === 400 && /image/i.test(detail) && hasImages(body)) {
-        errors.push(`${model}: dropped the images (${detail.slice(0, 90)})`);
+        errors.push(`${named}: dropped the images (${detail.slice(0, 90)})`);
         body = rebuilt({ image: null, images: [] });
         imageDropped = true;
         return attempt(model, structured);
       }
       return {
-        error: `${model}${structured ? ' [json]' : ''}: HTTP ${res.status} ${detail}`,
+        error: `${named}${structured ? ' [json]' : ''}: HTTP ${res.status} ${detail}`,
         then: structured && res.status === 400 ? 'format' : 'model',
       };
     }
@@ -1110,12 +1322,12 @@ async function ask(payload) {
       tokensRaised = true;
       thinking = 'off';
       body = forRetry(body);
-      errors.push(`${model}: empty reply (finish_reason=${finish || 'none'}) — retried with ${RETRY_TOKENS} tokens, no extended thinking, and told to answer at once`);
+      errors.push(`${named}: empty reply (finish_reason=${finish || 'none'}) — retried with ${RETRY_TOKENS} tokens, no extended thinking, and told to answer at once`);
       return attempt(model, structured);
     }
 
     return {
-      error: `${model}: unparseable reply ${JSON.stringify(String(raw).slice(0, 120))} ` +
+      error: `${named}: unparseable reply ${JSON.stringify(String(raw).slice(0, 120))} ` +
              `(finish_reason=${finish || 'none'}${blocked ? `, refused=${blocked}` : ''}, completion_tokens=${tokens ?? '?'}, ` +
              `max_tokens=${body.max_tokens})`,
       // A refusal is the same however it is asked; so is a model that ran out of room twice with its
@@ -1131,7 +1343,7 @@ async function ask(payload) {
       // Try structured output first, then plain — some models reject response_format.
       // DeepSeek's own endpoint has no such setting, so it is asked exactly once: sending the
       // same question twice for a flag it ignores only burns the account's rate limit.
-      for (const structured of deepseek ? [false] : [true, false]) {
+      for (const structured of deepseek || gweb ? [false] : [true, false]) {
         const r = await attempt(model, structured);
         if (r.parsed) return r.parsed;
         errors.push(r.error);
@@ -1217,6 +1429,22 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       .then(respond)
       .catch(e => respond({ error: String(e) }));
     return true;
+  }
+
+  // Options checks the Gemini-site provider with this: is a signed-in tab open, and does the
+  // site still hand out a model list for it? No question is sent to the model.
+  if (msg.type === 'gemini-web-test') {
+    geminiWebSelfTest()
+      .then(respond)
+      .catch(e => respond({ error: String(e) }));
+    return true;
+  }
+
+  // The tab the extension will borrow, saying it is loaded and ready. Recorded so the popup can
+  // say whether a usable tab exists without having to poll one every time it opens.
+  if (msg.type === 'gw-ready') {
+    chrome.storage.local.set({ geminiWebTabSeen: Date.now() }).catch(() => {});
+    return;
   }
 
   if (msg.type === 'capture') {

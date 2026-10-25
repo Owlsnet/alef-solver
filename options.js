@@ -1,12 +1,13 @@
 const FIELDS = ['provider', 'apiKey', 'model', 'fallbackModel', 'geminiKey', 'geminiModel', 'geminiFallbackModel',
                 'openaiKey', 'openaiModel', 'openaiFallbackModel',
                 'deepseekToken', 'deepseekModel', 'deepseekThinking', 'deepseekSearch',
+                'geminiWebModel', 'geminiWebFallbackModel', 'geminiWebThinking',
                 'answerDelay', 'stepDelay', 'retries', 'devMode', 'hotkeys', 'maxLessons'];
 const GEMINI_API = 'https://generativelanguage.googleapis.com/v1beta';
 const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
 const OPENAI_API = 'https://api.openai.com/v1';
 const DEFAULT_OPENAI_MODEL = 'gpt-5-mini';
-const SERVICES = ['openrouter', 'gemini', 'openai', 'deepseek'];
+const SERVICES = ['openrouter', 'gemini', 'openai', 'deepseek', 'gemini-web'];
 
 /* ------------------------------------------------------------- shortcuts */
 
@@ -137,6 +138,10 @@ async function load() {
   document.getElementById('deepseekModel').value = s.deepseekModel || 'deepseek-chat';
   document.getElementById('deepseekThinking').checked = s.deepseekThinking === true;
   document.getElementById('deepseekSearch').checked = s.deepseekSearch === true;
+  renderGeminiWebModels(s.geminiWebModels || []);
+  document.getElementById('geminiWebModel').value = s.geminiWebModel || '';
+  document.getElementById('geminiWebFallbackModel').value = s.geminiWebFallbackModel || '';
+  document.getElementById('geminiWebThinking').checked = s.geminiWebThinking === true;
   showProvider();
   document.getElementById('answerDelay').value = s.answerDelay ?? 120;
   document.getElementById('stepDelay').value = s.stepDelay ?? 250;
@@ -152,6 +157,7 @@ function showProvider() {
   document.getElementById('geminiFields').hidden = which !== 'gemini';
   document.getElementById('openaiFields').hidden = which !== 'openai';
   document.getElementById('deepseekFields').hidden = which !== 'deepseek';
+  document.getElementById('geminiWebFields').hidden = which !== 'gemini-web';
 }
 document.getElementById('provider').addEventListener('change', () => { showProvider(); status('Press Save to switch.'); });
 
@@ -181,6 +187,9 @@ function read() {
     deepseekModel: document.getElementById('deepseekModel').value || 'deepseek-chat',
     deepseekThinking: document.getElementById('deepseekThinking').checked,
     deepseekSearch: document.getElementById('deepseekSearch').checked,
+    geminiWebModel: document.getElementById('geminiWebModel').value,
+    geminiWebFallbackModel: document.getElementById('geminiWebFallbackModel').value,
+    geminiWebThinking: document.getElementById('geminiWebThinking').checked,
     answerDelay: num('answerDelay', 3000),
     stepDelay: num('stepDelay', 5000),
     retries: num('retries', 10),
@@ -361,11 +370,78 @@ async function testDeepseek() {
   }
 }
 
+/** The models the site said this account may use, as two drop-downs. The saved list is kept in
+ *  storage by the service worker, so the boxes are useful on a later visit without asking the
+ *  site again — and if the list is empty the boxes still offer the default, which always works. */
+function renderGeminiWebModels(models) {
+  const main = document.getElementById('geminiWebModel');
+  const fall = document.getElementById('geminiWebFallbackModel');
+  const keepMain = main.value, keepFall = fall.value;
+
+  main.textContent = '';
+  const dflt = document.createElement('option');
+  dflt.value = '';
+  dflt.textContent = "The account's default model (recommended)";
+  main.append(dflt);
+
+  fall.textContent = '';
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = 'None';
+  fall.append(none);
+
+  for (const m of models) {
+    const o = document.createElement('option');
+    o.value = m.name;
+    o.textContent = m.description ? `${m.label || m.name} — ${m.description}` : (m.label || m.name);
+    main.append(o);
+    fall.append(o.cloneNode(true));
+  }
+
+  // Keep whatever was chosen, even if this account's list no longer offers it: silently
+  // switching the model would change the answers without saying so.
+  if (keepMain && ![...main.options].some(o => o.value === keepMain)) {
+    const o = document.createElement('option');
+    o.value = keepMain;
+    o.textContent = `${keepMain} (saved, not offered by this account)`;
+    main.append(o);
+  }
+  main.value = keepMain || '';
+  if (keepFall && ![...fall.options].some(o => o.value === keepFall)) {
+    const o = document.createElement('option');
+    o.value = keepFall;
+    o.textContent = `${keepFall} (saved, not offered by this account)`;
+    fall.append(o);
+  }
+  fall.value = keepFall || '';
+}
+
+/** Check the Gemini-site provider: a signed-in tab open, and the site still answering with a
+ *  model list. Nothing is sent to the model, so it costs none of the account's allowance. */
+async function testGeminiWeb() {
+  status('Looking for a signed-in gemini.google.com tab…');
+  try {
+    const r = await chrome.runtime.sendMessage({ type: 'gemini-web-test' });
+    if (!r) { status('The extension\'s service worker did not answer — reload the extension and try again.', 'bad'); return; }
+    if (r.error) { status(r.error, 'bad'); return; }
+    const s = await chrome.storage.local.get('geminiWebModels');
+    renderGeminiWebModels(s.geminiWebModels || []);
+    status(`✓ ${r.note}`, 'ok');
+  } catch (e) {
+    status(`✗ ${e.message || e}`, 'bad');
+  }
+}
+
+document.getElementById('openGemini').addEventListener('click', () => {
+  chrome.tabs.create({ url: 'https://gemini.google.com/app' });
+});
+
 document.getElementById('test').addEventListener('click', async () => {
   const which = document.getElementById('provider').value;
   if (which === 'gemini') { await testGemini(); return; }
   if (which === 'openai') { await testOpenAI(); return; }
   if (which === 'deepseek') { await testDeepseek(); return; }
+  if (which === 'gemini-web') { await testGeminiWeb(); return; }
   const { apiKey, model } = read();
   if (!apiKey) { status('Paste a key first.', 'bad'); return; }
   status('Testing…');

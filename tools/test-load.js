@@ -64,11 +64,28 @@ async function cdp(p) { return (await fetch(`http://127.0.0.1:${PORT}${p}`)).jso
   check('every header operation is one Chrome allows', rules.every(r => (r.action.requestHeaders || []).every(h => OPS.includes(h.operation) && typeof h.header === 'string')));
   check('every resource type is one Chrome knows', rules.every(r => (r.condition.resourceTypes || []).every(t => TYPES.includes(t))));
   check('the condition is a URL filter, so the host permission covers it', rules.every(r => typeof r.condition.urlFilter === 'string'));
-  check('it rewrites origin and referer to the DeepSeek site',
+  check('it rewrites origin and referer to the site that wants them',
     rules.some(r => r.action?.requestHeaders?.some(h => h.header === 'origin' && h.value === 'https://chat.deepseek.com')) &&
     rules.some(r => r.action?.requestHeaders?.some(h => h.header === 'referer')));
-  check('it only ever touches chat.deepseek.com, so no other site is affected',
-    rules.every(r => /^https:\/\/chat\.deepseek\.com\//.test(r.condition.urlFilter)));
+  // Each rule may only touch the one host, and it may only claim to be an origin that host is
+  // legitimately called by. The upload endpoint is a different host from the Gemini app on
+  // purpose — the picture goes to Google's push service, addressed as the Gemini page would
+  // address it — so the two are not required to be the same name here.
+  const SCOPES = {
+    'https://chat.deepseek.com/': 'https://chat.deepseek.com',
+    'https://content-push.googleapis.com/': 'https://gemini.google.com',
+  };
+  check('every rule is scoped to one of the known hosts, so no other site is affected',
+    rules.every(r => Object.keys(SCOPES).some(p => r.condition.urlFilter.startsWith(p))));
+  check('and each claims only the origin its host is legitimately addressed by',
+    rules.every(r => {
+      const want = Object.entries(SCOPES).find(([p]) => r.condition.urlFilter.startsWith(p))?.[1];
+      const origin = (r.action.requestHeaders || []).find(h => h.header === 'origin')?.value || '';
+      return !!want && origin === want;
+    }));
+  check('the Gemini picture upload is rewritten to the Gemini site, not to DeepSeek',
+    rules.some(r => r.condition.urlFilter.startsWith('https://content-push.googleapis.com/') &&
+                    r.action.requestHeaders.some(h => h.header === 'origin' && h.value === 'https://gemini.google.com')));
   check('it only touches API calls, not the site\'s own page loads',
     rules.every(r => (r.condition.resourceTypes || []).every(t => t === 'xmlhttprequest')));
   check('`set` is used, not `append` — an appended second Referer would be rejected',
@@ -95,7 +112,29 @@ async function cdp(p) { return (await fetch(`http://127.0.0.1:${PORT}${p}`)).jso
     check('the encoder handles multi-byte text, not just ASCII',
       vm.runInContext("[...utf8('é')].join()", ctx) === '195,169' && vm.runInContext("[...utf8('日')].join()", ctx) === '230,151,165');
     check('no key or token is hard-coded in the file', !/deepseekToken:\s*'[^']+'/.test(bg));
+    check('the Gemini-site client is present, and talks to the tab rather than the network',
+      typeof ctx.geminiWebComplete === 'function' && typeof ctx.geminiWebSelfTest === 'function' && typeof ctx.gwTab === 'function');
   }
+
+  console.log('\nthe Gemini-site provider');
+  check('the manifest gives it a content script on the Gemini site',
+    (manifest.content_scripts || []).some(cs => (cs.matches || []).some(m => /gemini\.google\.com/.test(m)) && (cs.js || []).includes('gemini-web.js')));
+  check('that script only runs on the Gemini site, nowhere else',
+    (manifest.content_scripts || []).every(cs => !(cs.js || []).includes('gemini-web.js') ||
+      (cs.matches || []).every(m => /gemini\.google\.com/.test(m))));
+  check('the host permission covers the site and its upload endpoint',
+    (manifest.host_permissions || []).some(h => /gemini\.google\.com/.test(h)) &&
+    (manifest.host_permissions || []).some(h => /content-push\.googleapis\.com/.test(h)));
+  check('the script exists where the manifest says it is', fs.existsSync(path.join(ROOT, 'gemini-web.js')));
+
+  const gw = fs.readFileSync(path.join(ROOT, 'gemini-web.js'), 'utf8');
+  check('nothing that looks like a real Google credential is written into it',
+    !/["']AIza[0-9A-Za-z_-]{10,}["']/.test(gw) && !/__Secure-1PSID["']\s*[:=]\s*["'][^"']+["']/.test(gw));
+  check('it never reads the browser\'s cookies directly', !/document\.cookie/.test(gw));
+  check('it names no signing key or password field', !/password|passwd/i.test(gw));
+  check('the Gemini-site provider is wired into the answering path', /gemini-web/.test(bg) && /geminiWebComplete/.test(bg));
+  check('its picture upload runs in the worker, where host permissions apply to it',
+    /content-push\.googleapis\.com/.test(bg));
 
   /* ------------------------------------------------------------ the live load */
   console.log('\nloaded in headless Chrome');

@@ -71,6 +71,7 @@
     <option value="gemini">Google Gemini (your own Google key)</option>
     <option value="openai">OpenAI, the ChatGPT models (your own OpenAI key)</option>
     <option value="deepseek">DeepSeek — your own chat.deepseek.com login</option>
+    <option value="gemini-web">Google Gemini — your own gemini.google.com login</option>
   </select>
   <div class="hint">Only the one chosen here is used. Each keeps its own key and model below.</div>
 
@@ -154,6 +155,27 @@
 
   <label class="check" for="deepseekSearch"><input id="deepseekSearch" type="checkbox"> Web search</label>
   <div class="hint">Lets it search the web before answering. Rarely useful for coursework questions.</div>
+  </div>
+
+  <div id="geminiWebFields" hidden>
+  <div class="hint" style="margin-top:0">This one uses your own signed-in <b>gemini.google.com</b> tab instead of a key you buy. It sends the requests from that tab, because the login only works from there — so the tab has to be open and signed in whenever the tool answers a question. Nothing is copied out of it, and no password or token is stored here. Unlike the DeepSeek option, it can read pictures.</div>
+
+  <label for="geminiWebModel">Gemini model</label>
+  <select id="geminiWebModel">
+    <option value="">The account's default model (recommended)</option>
+  </select>
+  <div class="hint">Left as the default, the site itself picks the model, which is the safest choice and works on every account. Press “Test login” to fill this list with the models your account can actually use, then pick one — some of them (Pro, the higher tiers) only work on a paid account.</div>
+
+  <label for="geminiWebFallbackModel">Fallback model (optional)</label>
+  <select id="geminiWebFallbackModel">
+    <option value="">None</option>
+  </select>
+  <div class="hint">Tried if the first one is out of allowance. The account's limit is shared across its models, so this helps least here — but a different model sometimes still answers.</div>
+
+  <label class="check" for="geminiWebThinking"><input id="geminiWebThinking" type="checkbox"> Extended thinking</label>
+  <div class="hint">Lets it reason for longer before answering. Slower, and it uses the account's allowance faster.</div>
+
+  <div class="keyrow"><button class="ghost small" id="openGemini" type="button">Open gemini.google.com</button></div>
   </div>
 
   <label for="answerDelay">Delay after clicking an answer (ms)</label>

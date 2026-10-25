@@ -20,6 +20,7 @@ Click the extension's icon, then **Options…**. Under **Which service answers t
 | Google Gemini | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | `gemini-2.5-flash` |
 | OpenAI (ChatGPT models) | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | `gpt-5-mini` |
 | DeepSeek | your own chat.deepseek.com login — no key to buy | `deepseek-chat` |
+| Google Gemini (site login) | your own gemini.google.com login, in an open tab — no key to buy | the account's default |
 
 Paste the key, press **Test key** (you want a green ✓ and the model's one-word reply), then **Save**.
 
@@ -38,6 +39,14 @@ Two things to know before you use it:
 - **A lesson run is slower on it.** Every question costs about a second of puzzle-solving first, and the two models are `deepseek-chat` (fast) and `deepseek-expert` (slower). DeepThink makes it slower again.
 - **It is your own account being used.** The site sees one person answering a lot of questions quickly, which is not what the site is for, and it may not like it. That risk is yours to weigh, and the same login stops working if you sign out on the site.
 - **Pictures are not read.** Diagram questions are answered from the text alone, and the status line says when that happened, so pick another service if your work is full of graphs.
+
+### The Google Gemini option (your own site login)
+
+Same idea as DeepSeek — your own account, no key to buy — but it works differently, and it needs one thing from you:
+
+**Leave a signed-in `gemini.google.com` tab open while the tool answers.** The extension sends its questions from inside that tab, because that is the only place your Google login is valid. It does not copy your cookies or store a password. In Options, press **Test login** and it will tell you whether it found the tab, then fill the model box with the models your account can actually use.
+
+The good news compared with DeepSeek: **it reads pictures**, so diagram questions work, and there is no anti-bot puzzle slowing every question down. Leave the model box on the default unless you have a reason not to — the default is the one model every account has, and some of the others only work on a paid account. The account's allowance is shared, so a long lesson run can use it up; the status line says so if that happens.
 
 
 ## 3. Answer something
@@ -66,6 +75,7 @@ Watch the status line at the top right of the lesson page; it says what it is do
 - **A refused key** (HTTP 401, or "check the key in Options"): the key is wrong or not allowed to use that model. On DeepSeek it means the login has expired — sign in on the site again and press **Copy token from the site**.
 - **"Could not see the picture"**: the model cannot read images. Pick one that can in Options.
 - **"Could not solve the proof-of-work"** on DeepSeek: the site changed its puzzle. Nothing on your side will fix it; use another service and it can be looked at.
+- **"No signed-in gemini.google.com tab is open"** on the Gemini login option: open that site in a tab, sign in, and leave the tab open. If it is already open, reload it — the extension can only use a tab it has loaded its script into.
 - **An empty reply that ran out of room**: the model thinks too long to answer. Try a different one.
 - **Nothing changes after an update**: reload the extension, then F5 the tab, and check the version in the popup.
 

@@ -1,4 +1,4 @@
-const KEYS = ['autoSubmit', 'openPassage', 'screenshot', 'apiKey', 'provider', 'geminiKey', 'openaiKey', 'deepseekToken', 'advance', 'cachePassage', 'devMode', 'hotkeys', 'autoNextLesson', 'skipLater'];
+const KEYS = ['autoSubmit', 'openPassage', 'screenshot', 'apiKey', 'provider', 'geminiKey', 'openaiKey', 'deepseekToken', 'geminiWebModel', 'advance', 'cachePassage', 'devMode', 'hotkeys', 'autoNextLesson', 'skipLater'];
 
 // Developer mode (set in Options) shows Dump and Copy last report. Reports are saved
 // either way; the switch only decides whether there is a button to copy one.
@@ -37,6 +37,7 @@ async function load() {
   const cred = s.provider === 'gemini' ? s.geminiKey
              : s.provider === 'openai' ? s.openaiKey
              : s.provider === 'deepseek' ? s.deepseekToken
+             : s.provider === 'gemini-web' ? true      // its credential is an open tab, checked below
              : s.apiKey;
   document.getElementById('warn').classList.toggle('on', !cred);
   document.getElementById('warn').textContent = s.provider === 'deepseek'
@@ -46,6 +47,24 @@ async function load() {
   dev = s.devMode === true;
   document.getElementById('dump').hidden = !dev;
   document.getElementById('report').hidden = !dev;
+
+  // The Gemini-site service has nothing to paste, so what can go wrong is simply that no
+  // signed-in tab is open — which is worth saying before a question is asked, not after.
+  if (s.provider === 'gemini-web') {
+    let tuned = false;
+    try {
+      const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+      for (const tab of tabs) {
+        if (tab.id == null) continue;
+        try {
+          const r = await chrome.tabs.sendMessage(tab.id, { type: 'gw-ping' });
+          if (r?.ok) { tuned = true; break; }
+        } catch { /* that tab is old or still loading */ }
+      }
+    } catch { /* no permission to look: say nothing rather than something wrong */ }
+    document.getElementById('warn').classList.toggle('on', !tuned);
+    document.getElementById('warn').textContent = 'No signed-in gemini.google.com tab is open. Open one and leave it open.';
+  }
 
   hotkeys = s.hotkeys || DEFAULT_HOTKEYS;
   document.getElementById('hk').textContent = keyLabel('solve') ? `· ${keyLabel('solve')}` : '';
