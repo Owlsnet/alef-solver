@@ -51,6 +51,11 @@ The good news compared with DeepSeek: **it reads pictures**, so diagram question
 ### One chat, not hundreds
 
 On DeepSeek and the Gemini login, every question goes into the same chat instead of starting a new one, so your chat list on those sites stays tidy. The chat remembers the earlier questions, which is usually harmless; to keep it from drifting, a fresh chat is started after 30 questions, and whenever you change the model or the Google account. If you delete the chat on the site, the next question just starts a new one. In Options, **Keep using one chat** turns this off, and **Start a new chat with the next question** ends the current chat on the spot — handy if the answers start to look influenced by earlier questions.
+### Faster answers
+
+The status line after each answer says where the time went: `shot` is the screenshot, `setup` is what the service needed before it could be asked (`kept` means it was remembered from the last question), `pic` is uploading the screenshot, and `ai` is the model itself. The biggest part is usually `ai`, which depends on the model you picked: choose a quick one rather than a Pro or thinking one.
+
+Two things you can change. On the Gemini login, **Options → Speed** has the switches for remembering the session between questions and for uploading the screenshot early, plus a table of the last answers' times grouped by which switches were on — answer ten questions with one on and ten with it off, press Refresh, and read the "per question" column. And the popup's **Screenshot → Smart** takes a picture only when the words are not enough, which skips the capture and upload on an ordinary question. It is off unless you choose it. If an answer comes out wrong on a question that needed a picture, put it back on Auto.
 
 ## 3. Answer something
 

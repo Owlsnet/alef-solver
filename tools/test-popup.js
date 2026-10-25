@@ -317,6 +317,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   t = await click('run');
   check('off: a script error says the same', /page script failed: boom/.test(t) && /Developer mode in Options/.test(t) && !/Copy last report/.test(t), JSON.stringify(t));
 
+  console.log('\n=== the Screenshot setting ===');
+  await open({ store: { screenshot: 'smart' }, replies: { 'do-ping': ok({ kind: null }) } });
+  await settled();
+  check('the Screenshot box offers the smart mode, and shows it when it is set',
+    await s.eval(`[...document.getElementById('screenshot').options].some(o => o.value === 'smart')`) && await s.eval(`document.getElementById('screenshot').value`) === 'smart');
+  check('and the other modes are still there, in order', JSON.stringify(await s.eval(`[...document.getElementById('screenshot').options].map(o => o.value)`)) === JSON.stringify(['auto', 'smart', 'always', 'never']));
+  await open({ replies: { 'do-ping': ok({ kind: null }) } });
+  await settled();
+  check('with nothing set it is still Auto', await s.eval(`document.getElementById('screenshot').value`) === 'auto');
+
   s.close();
   console.log(`\n${fail === 0 ? '✓ all' : '✗'} ${pass} passed, ${fail} failed\n`);
   cleanup();

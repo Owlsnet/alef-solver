@@ -395,6 +395,55 @@ const STUB = (store = {}) => `
   check('and says what happens next', /next question will start a new chat/i.test(await status()), await status());
   check('without touching any other setting', st.provider === 'gemini-web');
 
+  /* ------------------------------------------------------- Speed */
+  console.log('\n=== Speed: the switches and the timing table ===');
+  await open({});
+  check('both speed ideas are on for a fresh install', await checkedBox('speedCache') === true && await checkedBox('speedParallel') === true);
+  await open({ speedCache: false, speedParallel: false });
+  check('and stay off once switched off', await checkedBox('speedCache') === false && await checkedBox('speedParallel') === false);
+
+  await open({ provider: 'gemini-web' });
+  await ev(`(() => { const e = document.getElementById('speedParallel'); e.checked = false; e.dispatchEvent(new Event('change', { bubbles: true })); return 'ok'; })()`);
+  await click('save');
+  st = await ev(`JSON.stringify(window.__store)`).then(JSON.parse);
+  check('saving keeps one switched off and the other on', st.speedParallel === false && st.speedCache === true, JSON.stringify({ c: st.speedCache, p: st.speedParallel }));
+
+  const tableRows = () => ev(`JSON.stringify([...document.querySelectorAll('#speedTable table.speed tbody tr')].map(tr => [...tr.cells].map(td => td.textContent)))`).then(JSON.parse);
+  const entry = (mode, over) => ({ at: 1, total: 4000, mode: { provider: 'gemini-web', cache: true, parallel: true, shot: 'auto', ...mode }, ...over });
+
+  await open({});
+  check('with nothing logged it says so, and shows no table', /Nothing logged yet/.test(await ev(`document.getElementById('speedTable').textContent`)) && (await tableRows()).length === 0);
+
+  await open({ speedLog: [
+    entry({}, { total: 3000, shot: 1000, setup: 100, upload: 500, ai: 2000 }),
+    entry({}, { total: 5000, shot: 0, setup: 300, ai: 4000 }),
+    entry({ cache: false }, { total: 6000, shot: 1000, setup: 1500, upload: 600, ai: 3000 }),
+    { at: 4, total: 2500, mode: { provider: 'deepseek', shot: 'never' } },
+    { at: 5, total: 'junk', mode: { provider: 'deepseek', shot: 'never' } },
+    { at: 6, total: 9000 },
+  ] });
+  const rows = await tableRows();
+  check('the answers are grouped by the switches that were on, three groups here', rows.length === 3, JSON.stringify(rows.map(r => r[0])));
+  check('each group is named by its service and switches',
+    rows[0][0] === 'DeepSeek · screenshot never' &&
+    rows[1][0] === 'Gemini login · session kept off, parallel upload on · screenshot auto' &&
+    rows[2][0] === 'Gemini login · session kept on, parallel upload on · screenshot auto', JSON.stringify(rows.map(r => r[0])));
+  check('a group averages its answers: count, per question (the capture counted in), shot, setup, picture, model',
+    JSON.stringify(rows[2].slice(1)) === JSON.stringify(['2', '4.5', '0.5', '0.2', '0.5', '3.0']), JSON.stringify(rows[2].slice(1)));
+  check('a single answer is its own average', JSON.stringify(rows[1].slice(1)) === JSON.stringify(['1', '7.0', '1.0', '1.5', '0.6', '3.0']), JSON.stringify(rows[1].slice(1)));
+  check('a stage a service does not have is a dash, not a zero', JSON.stringify(rows[0].slice(1)) === JSON.stringify(['1', '2.5', '0.0', '–', '–', '–']), JSON.stringify(rows[0].slice(1)));
+  check('an entry with no number for its total, or no switches, is left out of the count', rows.reduce((n, r) => n + Number(r[1]), 0) === 4, JSON.stringify(rows.map(r => r[1])));
+
+  // Refresh reads what has been logged since; Clear empties the log.
+  await ev(`window.__store.speedLog.push(${JSON.stringify(entry({ parallel: false }, { total: 1000, shot: 0, setup: 50, ai: 900 }))}); 'ok'`);
+  await click('speedRefresh');
+  check('Refresh picks up answers logged since the page was opened', (await tableRows()).length === 4, JSON.stringify((await tableRows()).map(r => r[0])));
+  await click('speedClear');
+  st = await ev(`JSON.stringify(window.__store)`).then(JSON.parse);
+  check('Clear empties the log', Array.isArray(st.speedLog) && st.speedLog.length === 0, JSON.stringify(st.speedLog));
+  check('and the table with it, saying so', (await tableRows()).length === 0 && /Nothing logged yet/.test(await ev(`document.getElementById('speedTable').textContent`)));
+  check('and tells the person', /speed log is cleared/i.test(await status()), await status());
+
   s.close();
   console.log(`\n${fail === 0 ? '✓ all' : '✗'} ${pass} passed, ${fail} failed\n`);
   cleanup();

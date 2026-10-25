@@ -2085,6 +2085,41 @@
 
   /* ========================================================= screenshotting */
 
+  /** Words that say a question is about something drawn, and words that say it is about a passage.
+   *  English and Arabic, because both lessons are met. These only ever ADD a screenshot to "smart"
+   *  mode: a false alarm costs a second, a miss costs a question answered blind. */
+  const FIGURE_WORDS = /\b(graph|chart|figure|diagram|picture|image|photo|map|table|illustration|drawing|sketch)s?\b|الشكل|الأشكال|الرسم|الصورة|الصور|الجدول|المخطط|البياني|الخريطة/i;
+  const PASSAGE_WORDS = /\b(passage|paragraph|excerpt|poem|story|article|text|extract)s?\b|الفقرة|القطعة|القصة|القصيدة|المقال|النص/i;
+  // What the page puts where a picture answer has no words.
+  const PICTURE_ANSWER = /image content/i;
+
+  /** Whether to take a screenshot before asking, for the popup's Screenshot setting.
+   *   always   every time.
+   *   auto     when it is likely to matter: a figure, or a choice question whose passage was not
+   *            read (a fill-in or drop-down already carries its instructions in the text).
+   *   smart    only when the words are not enough, and the words are trusted
+   *            otherwise: no capture, no upload, nothing extra for the model to read. It takes one
+   *            for a figure, for a stem that is empty or only the instruction (the question is in
+   *            a picture), for answers that are pictures or blank, for a stem that names a figure,
+   *            and for a stem that names a passage nobody read. A plain question with a stem and
+   *            worded answers goes without.
+   *   never    (or anything else) not at all.
+   *  `q` is { kind, imageCount, passageLen, stem, instruction, optionTexts }. */
+  function wantsScreenshot(mode, q) {
+    if (mode === 'always') return true;
+    if (mode === 'auto') return q.imageCount > 0 || (q.kind === 'choice' && q.passageLen < 250);
+    if (mode !== 'smart') return false;
+
+    if (q.imageCount > 0) return true;
+    const stem = String(q.stem || '').trim();
+    if (FIGURE_WORDS.test(stem)) return true;
+    if (q.kind !== 'choice') return false;               // the other kinds carry their words in their own parts
+
+    if (!stem || stem === String(q.instruction || '').trim()) return true;
+    if ((q.optionTexts || []).some(t => !String(t || '').trim() || PICTURE_ANSWER.test(t))) return true;
+    return PASSAGE_WORDS.test(stem) && q.passageLen < 250;
+  }
+
   /** Grab the page, scrolling and stitching when the question is taller than
    *  the viewport. Returns a JPEG data URL, or null if capture is blocked. */
   async function screenshot(maxCaptures) {
@@ -2769,19 +2804,18 @@
       }
     }
 
-    // Screenshot only when it's likely to matter — it's the slow part. A choice
-    // question needs the passage; a fill-in or drop-down already carries its
-    // instructions and figures in the text, so only a real image justifies one.
-    const textIsEnough = p.kind !== 'choice';
-    const wantsShot =
-      CFG.screenshot === 'always' ||
-      (CFG.screenshot === 'auto' &&
-        (p.images.length > 0 || (!textIsEnough && (!passage || passage.length < 250))));
+    // A screenshot is the slow part of a question, so it is only taken when it is likely to matter.
+    const wantsShot = wantsScreenshot(CFG.screenshot, {
+      kind: p.kind, imageCount: p.images.length, passageLen: passage ? passage.length : 0,
+      stem: p.stem, instruction: p.instruction, optionTexts: p.options.map(o => o.text),
+    });
 
-    let image = null;
+    let image = null, shotMs = 0;
     if (wantsShot) {
       say('capturing page…');
+      const tShot = performance.now();
       image = await screenshot(4).catch(() => null);
+      shotMs = Math.round(performance.now() - tShot);
       // A cached passage makes the screenshot redundant unless there's a figure.
       if (image && passage.length > 250 && p.images.length === 0) image = null;
     }
@@ -2820,11 +2854,13 @@
         images: p.images.filter(u => u.startsWith('data:')),
         imageCount: p.images.length,
         image,
+        shotMs,                     // how long the capture took, for the timing log
       },
     });
     const ms = Math.round(performance.now() - t0);
     // No model on the list could read the picture, so this answer is a guess from the words.
     const blind = ans?.imageDropped ? ' · ⚠ could not see the picture' : '';
+    const speedNote = speedNoteOf(ans?.timing, shotMs);
 
     if (!ans || ans.error) {
       hud(`✗ ${ans?.error || 'no response'}`);
@@ -2839,7 +2875,7 @@
         hud(`✗ model ordered ${order.length} of ${p.sort.items.length} items`);
         return { ok: false, reason: 'sort-count', order };
       }
-      hud(`→ ${order.map(j => j + 1).join(' ')} · ${ms}ms${blind}`);
+      hud(`→ ${order.map(j => j + 1).join(' ')} · ${ms}ms${blind}${speedNote}`);
       console.log('[alef-solver]', ans.why, ans.raw);
 
       if (CFG.autoSubmit) hud('ordering…');
@@ -2865,7 +2901,7 @@
       const words = fills.map(j => p.drag.items[j]?.text);
       if (words.some(w => w == null)) { hud('✗ an answer was out of range'); return { ok: false, reason: 'drag-range', fills }; }
 
-      hud(`→ ${words.join(' / ')} · ${ms}ms${blind}`);
+      hud(`→ ${words.join(' / ')} · ${ms}ms${blind}${speedNote}`);
       console.log('[alef-solver]', ans.why, ans.raw);
 
       if (CFG.autoSubmit) hud('dragging…');
@@ -2889,7 +2925,7 @@
         return { ok: false, reason: 'match-count', pairs };
       }
 
-      hud(`→ ${pairs.map(j => j + 1).join(' ')} · ${ms}ms${blind}`);
+      hud(`→ ${pairs.map(j => j + 1).join(' ')} · ${ms}ms${blind}${speedNote}`);
       console.log('[alef-solver]', ans.why, ans.raw);
 
       if (CFG.autoSubmit) hud('linking…');
@@ -2918,7 +2954,7 @@
         return { ok: false, reason: 'dropdown-range', picks, menus };
       }
 
-      hud(`→ ${words.join(' / ')} · ${ms}ms${blind}`);
+      hud(`→ ${words.join(' / ')} · ${ms}ms${blind}${speedNote}`);
       console.log('[alef-solver]', ans.why, ans.raw);
 
       if (CFG.autoSubmit) hud('submitting…');
@@ -2939,7 +2975,7 @@
       const words = ans.words || [];
       if (!words.length) { hud('✗ no blanks returned'); return { ok: false, reason: 'cloze-empty' }; }
 
-      hud(`→ ${words.join(' / ')} · ${ms}ms${blind}`);
+      hud(`→ ${words.join(' / ')} · ${ms}ms${blind}${speedNote}`);
       console.log('[alef-solver]', ans.why, ans.raw, ans.mismatch || '');
 
       if (CFG.autoSubmit) hud('submitting…');
@@ -2963,7 +2999,7 @@
         return { ok: false, reason: 'range', picks };
       }
       const letters = picks.map(i => 'ABCDEFGHIJ'[i]);
-      hud(`→ ${letters.join(' + ')} · ${ms}ms${blind}${ans.confidence != null ? ` · ${(ans.confidence * 100) | 0}%` : ''}`);
+      hud(`→ ${letters.join(' + ')} · ${ms}ms${blind}${speedNote}${ans.confidence != null ? ` · ${(ans.confidence * 100) | 0}%` : ''}`);
       console.log('[alef-solver]', ans.why, ans.raw);
 
       if (CFG.autoSubmit) hud('ticking…');
@@ -2998,7 +3034,7 @@
       return { ok: false, reason: 'range' };
     }
 
-    hud(`→ ${'ABCDEFGHIJ'[idx]} · ${ms}ms${blind}${ans.confidence != null ? ` · ${(ans.confidence * 100) | 0}%` : ''}`);
+    hud(`→ ${'ABCDEFGHIJ'[idx]} · ${ms}ms${blind}${speedNote}${ans.confidence != null ? ` · ${(ans.confidence * 100) | 0}%` : ''}`);
     console.log('[alef-solver]', ans.why, ans.raw);
 
     if (CFG.autoSubmit) hud('submitting…');
@@ -3494,6 +3530,21 @@
   }
 
   /* ================================================================== HUD */
+
+  /** Where an answer's time went, for the end of its status line: the screenshot,
+   *  the setup the service needed before it could be asked (marked when it was remembered from
+   *  the last question), the picture upload, and the model itself. A stage that did not happen
+   *  is left out rather than shown as 0.0s. */
+  function speedNoteOf(t, shotMs) {
+    if (!t) return '';
+    const sec = ms => `${(ms / 1000).toFixed(1)}s`;
+    const parts = [];
+    if (shotMs) parts.push(`shot ${sec(shotMs)}`);
+    if (t.setup != null) parts.push(`setup ${sec(t.setup)}${t.cached ? ' (kept)' : ''}`);
+    if (t.upload) parts.push(`pic ${sec(t.upload)}`);
+    if (t.ai != null) parts.push(`ai ${sec(t.ai)}`);
+    return parts.length ? ` · ${parts.join(' · ')}` : '';
+  }
 
   let hudEl = null, hudTimer = null;
   function hud(msg, sticky) {
@@ -4087,7 +4138,7 @@
   window.__alefSolver = {
     scrape, commit, commitMulti, commitCloze, commitDropdown, readDropdownOptions, commitMatch, commitDrag,
     report, solve, solveOne, solveLesson,
-    dump, screenshot, selected, findButton,
+    dump, screenshot, wantsScreenshot, selected, findButton,
     findSubmit: (root) => findButton('submit', root),
     findCloze, findWordBank, setInputValue,
     forgetPassage, lessonKey, isGraded, contentScreen, commitSort, feedbackForm, feedbackSubmit, stop: () => { stopRun = true; },

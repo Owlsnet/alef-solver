@@ -652,18 +652,21 @@ const useGemini = (extra = {}) => { store = { provider: 'gemini', geminiKey: KEY
   console.log('\nthe Gemini site: one conversation is kept going instead of a new one per question');
   // The service worker never talks to the site itself: it talks to a tab. This is that tab.
   let tabLog = [], genQueue = [], genN = 0, convN = 0, tabAccount = '1';
+  let tabId = 7, tabUrl = 'https://gemini.google.com/app', modelsReply = null, onModels = null;
   const WEB_MODELS = [
     { id: 'id-flash', name: 'gemini-flash', label: 'Flash', description: '', number: 1 },
     { id: 'id-pro', name: 'gemini-pro', label: 'Pro', description: '', number: 3 },
   ];
   ctx.chrome.tabs = {
-    query: async () => [{ id: 7 }],
+    query: async () => [{ id: tabId, url: tabUrl }],
     sendMessage: async (_id, msg) => {
       tabLog.push(msg);
       switch (msg.type) {
         case 'gw-ping': return { ok: true };
         case 'gw-init': return { ok: true, session: { at: 'T', hl: 'en', account: tabAccount, push: 'feeds/x' } };
-        case 'gw-models': return { ok: true, status: 1000, capacity: { capacity: 1, capacityField: 12 }, models: WEB_MODELS };
+        case 'gw-models':
+          if (onModels) onModels();
+          return modelsReply || { ok: true, status: 1000, capacity: { capacity: 1, capacityField: 12 }, models: WEB_MODELS };
         case 'gw-generate': {
           const scripted = genQueue.shift();
           if (scripted) return scripted;
@@ -675,7 +678,14 @@ const useGemini = (extra = {}) => { store = { provider: 'gemini', geminiKey: KEY
       }
     },
   };
-  const useWeb = (extra = {}) => { store = { provider: 'gemini-web', ...extra }; tabLog = []; genQueue = []; genN = 0; convN = 0; tabAccount = '1'; };
+  // Each scenario starts with nothing remembered from the last one, the session cache included
+  // (it is dropped synchronously; the storage call behind it has no stub here and is ignored).
+  const useWeb = (extra = {}) => {
+    store = { provider: 'gemini-web', ...extra };
+    tabLog = []; genQueue = []; genN = 0; convN = 0; tabAccount = '1';
+    tabId = 7; tabUrl = 'https://gemini.google.com/app'; modelsReply = null; onModels = null;
+    ctx.gwCacheDrop();
+  };
   const gens = () => tabLog.filter(m => m.type === 'gw-generate');
   const webOld = (over = {}) => ({ cid: 'c_old', rid: 'r_old', rcid: 'rc_old', turns: 5, model: '', account: '1', at: 1, ...over });
 
@@ -753,6 +763,177 @@ const useGemini = (extra = {}) => { store = { provider: 'gemini', geminiKey: KEY
   genQueue = [{ ok: true, text: ANS, done: true }];
   await ctx.ask(mcq());
   check('a reply that came back without its ids is answered but not kept', !store.geminiWebChat, j(store.geminiWebChat));
+
+  /* ------------------------------------------------ the Gemini session is kept */
+  console.log('\nthe Gemini session and model list are kept between questions');
+  // The upload below runs in this realm too; it needs the same few browser pieces.
+  ctx.URL = URL; ctx.TextEncoder = TextEncoder; ctx.FormData = FormData; ctx.Blob = Blob;
+  ctx.atob = s => Buffer.from(s, 'base64').toString('binary');
+  const count = type => tabLog.filter(m => m.type === type).length;
+  const MIN = 60 * 1000;
+
+  useWeb({ reuseChat: false });
+  res = await ctx.ask(mcq());
+  check('the first question asks the page for its session and for the model list, once each',
+    res.index === 1 && count('gw-init') === 1 && count('gw-models') === 1, j({ init: count('gw-init'), models: count('gw-models') }));
+  check('and its timing says the setup was done, not kept', res.timing.cached === false);
+  tabLog = [];
+  res = await ctx.ask(mcq());
+  const res2 = await ctx.ask(mcq());
+  check('the next questions ask for neither, and are still answered',
+    count('gw-init') === 0 && count('gw-models') === 0 && gens().length === 2 && res.index === 1 && res2.index === 1, j({ init: count('gw-init'), models: count('gw-models'), gens: gens().length }));
+  check('and their timing says the setup was kept', res.timing.cached === true && res2.timing.cached === true);
+  check('the kept session is what the question is sent with', gens().every(g => g.session.at === 'T' && g.session.account === '1'));
+
+  useWeb({ reuseChat: false, speedCache: false });
+  await ctx.ask(mcq());
+  await ctx.ask(mcq());
+  check('with the switch off every question asks for both, as it used to', count('gw-init') === 2 && count('gw-models') === 2, j({ init: count('gw-init'), models: count('gw-models') }));
+
+  // It is kept for ten minutes and no longer.
+  useWeb({ reuseChat: false });
+  ctx.__clock = 1_700_000_000_000;
+  vm.runInContext('globalThis.__realNow = Date.now; Date.now = () => globalThis.__clock', ctx);
+  await ctx.ask(mcq());
+  ctx.__clock += 9 * MIN; tabLog = [];
+  await ctx.ask(mcq());
+  check('nine minutes later it is still kept', count('gw-init') === 0 && count('gw-models') === 0);
+  ctx.__clock += 2 * MIN; tabLog = [];
+  await ctx.ask(mcq());
+  check('eleven minutes after it was fetched it is asked for again', count('gw-init') === 1 && count('gw-models') === 1, j({ init: count('gw-init'), models: count('gw-models') }));
+  vm.runInContext('Date.now = globalThis.__realNow', ctx);
+
+  // It belongs to one tab and one Google account slot.
+  useWeb({ reuseChat: false });
+  await ctx.ask(mcq());
+  tabId = 8; tabLog = [];
+  await ctx.ask(mcq());
+  check('another tab does not borrow the first one\'s session', count('gw-init') === 1);
+  tabUrl = 'https://gemini.google.com/u/2/app'; tabLog = [];
+  await ctx.ask(mcq());
+  check('nor does the same tab once it is on another Google account', count('gw-init') === 1);
+  tabLog = [];
+  await ctx.ask(mcq());
+  check('and once there, the next question keeps it again', count('gw-init') === 0);
+
+  // The site turning the session down is not a failed question: fetch it again and ask again.
+  useWeb();
+  await ctx.ask(mcq());
+  genQueue = [{ ok: false, status: 400, detail: 'stale' }];
+  tabLog = [];
+  res = await ctx.ask(mcq());
+  check('a kept session the site refuses is fetched again, and the question asked once more',
+    res.index === 1 && !res.error && count('gw-init') === 1 && count('gw-models') === 1 && gens().length === 2, j({ n: gens().length, init: count('gw-init'), e: res.error }));
+  check('in the same conversation, not a new one', gens()[0].chat !== null && j(gens()[1].chat) === j(gens()[0].chat), j(gens().map(g => g.chat)));
+  check('and the conversation carries on', store.geminiWebChat.turns === 2 && store.geminiWebChat.cid === 'c_1', j(store.geminiWebChat));
+
+  useWeb();
+  await ctx.ask(mcq());
+  genQueue = [{ ok: true, text: '', failure: 'refused without saying why', code: -1 }];
+  tabLog = [];
+  res = await ctx.ask(mcq());
+  check('a refusal with no reason from a kept session fetches it again too', res.index === 1 && count('gw-init') === 1 && gens().length === 2, j({ n: gens().length, init: count('gw-init'), e: res.error }));
+
+  useWeb({ reuseChat: false });
+  await ctx.ask(mcq());
+  genQueue = [{ ok: false, status: 429, detail: 'slow down' }];
+  tabLog = [];
+  res = await ctx.ask(mcq());
+  check('a rate limit is not mistaken for a stale session', !!res.error && count('gw-init') === 0 && gens().length === 1, j({ n: gens().length, init: count('gw-init') }));
+
+  useWeb({ reuseChat: false });
+  await ctx.ask(mcq());
+  genQueue = [{ ok: false, status: 400, detail: 'a' }, { ok: false, status: 400, detail: 'b' }];
+  tabLog = [];
+  res = await ctx.ask(mcq());
+  check('a session refused even when fresh is tried once more, not again and again', !!res.error && gens().length === 2 && count('gw-init') === 1, j({ n: gens().length, init: count('gw-init') }));
+
+  // Only a healthy account is worth remembering.
+  useWeb({ reuseChat: false });
+  modelsReply = { ok: true, status: 1016, capacity: { capacity: 1, capacityField: 12 }, models: [] };
+  await ctx.ask(mcq());
+  tabLog = [];
+  await ctx.ask(mcq());
+  check('an account that did not answer healthily is looked at again every time', count('gw-init') === 1 && count('gw-models') === 1, j({ init: count('gw-init'), models: count('gw-models') }));
+
+  // A model that is not in the kept list may have been added since.
+  useWeb({ reuseChat: false });
+  await ctx.ask(mcq());
+  modelsReply = { ok: true, status: 1000, capacity: { capacity: 1, capacityField: 12 },
+    models: [...WEB_MODELS, { id: 'id-new', name: 'gemini-new', label: 'New', description: '', number: 5 }] };
+  store.geminiWebModel = 'gemini-new';
+  tabLog = [];
+  res = await ctx.ask(mcq());
+  check('a model missing from the kept list is looked for again before giving up', res.index === 1 && count('gw-models') === 1 && gens()[0].model?.id === 'id-new', j({ models: count('gw-models'), model: gens()[0]?.model?.id, e: res.error }));
+  store.geminiWebModel = 'gemini-ghost';
+  tabLog = [];
+  res = await ctx.ask(mcq());
+  check('one that is not there even then is reported, after a single new look', /no model called/.test(res.error || '') && count('gw-models') === 1 && gens().length === 0, j({ models: count('gw-models'), e: res.error }));
+
+  // Test login proves the login and leaves the first real question warm.
+  useWeb({ reuseChat: false });
+  const proved = await ctx.geminiWebSelfTest();
+  tabLog = [];
+  res = await ctx.ask(mcq());
+  check('after Test login the first real question needs no setup', proved.ok === true && count('gw-init') === 0 && count('gw-models') === 0 && res.timing.cached === true, j({ proved: proved.ok, init: count('gw-init') }));
+
+  /* --------------------------------------------- the picture upload beside the list */
+  console.log('\nthe screenshot is uploaded while the model list loads');
+  const SHOT = 'data:image/jpeg;base64,QUFBQQ==';
+  let uploads = 0, uploadsWhenListAsked = -1;
+  const uploadOnly = async url => {
+    if (/content-push/.test(String(url))) { uploads++; return { ok: true, status: 200, text: async () => 'https://x/up' }; }
+    throw new Error(`unexpected request to ${url}`);
+  };
+  for (const [parallel, wantStarted] of [[true, 1], [false, 0]]) {
+    useWeb({ reuseChat: false, speedParallel: parallel });
+    uploads = 0; uploadsWhenListAsked = -1;
+    fetchImpl = uploadOnly;
+    onModels = () => { uploadsWhenListAsked = uploads; };
+    res = await ctx.ask(mcq({ image: SHOT, imageCount: 1 }));
+    check(`with the switch ${parallel ? 'on' : 'off'}, ${wantStarted ? 'the upload has already started' : 'the upload has not started'} when the model list is asked for`,
+      res.index === 1 && uploadsWhenListAsked === wantStarted, j({ started: uploadsWhenListAsked, e: res.error }));
+    check('either way the picture is uploaded once and goes with the question', uploads === 1 && gens()[0].fileData?.[0]?.[0]?.[0] === 'https://x/up', j({ uploads, fd: gens()[0]?.fileData }));
+    check('and the timing shows an upload', Number.isFinite(res.timing.upload));
+  }
+
+  useWeb({ reuseChat: false });
+  await ctx.ask(mcq());                                 // warm: the session is now kept
+  uploads = 0; fetchImpl = uploadOnly; onModels = null; tabLog = [];
+  res = await ctx.ask(mcq({ image: SHOT, imageCount: 1 }));
+  check('with the session kept, the upload starts at once and nothing is asked of the page first', res.index === 1 && uploads === 1 && count('gw-init') === 0 && count('gw-models') === 0, j({ uploads, init: count('gw-init') }));
+  res = await ctx.ask(mcq());
+  check('a question without a picture has no upload in its timing', res.timing.upload === undefined);
+
+  /* ----------------------------------------------------------------- the timings */
+  console.log('\nevery answer carries its timing, and the last ones are logged');
+  useWeb({ reuseChat: false });
+  res = await ctx.ask(mcq({ shotMs: 840 }));
+  check('an answer carries the whole time, the setup and the model\'s',
+    Number.isFinite(res.timing.total) && Number.isFinite(res.timing.setup) && Number.isFinite(res.timing.ai), j(res.timing));
+  check('and the screenshot time the page reported', res.timing.shot === 840);
+  check('and which switches were on', j(res.timing.mode) === j({ provider: 'gemini-web', cache: true, parallel: true, shot: 'auto' }), j(res.timing.mode));
+  check('it is written to the log', store.speedLog?.length === 1 && store.speedLog[0].total === res.timing.total && j(store.speedLog[0].mode) === j(res.timing.mode), j(store.speedLog));
+
+  useWeb({ reuseChat: false, speedCache: false, speedParallel: false, screenshot: 'smart' });
+  res = await ctx.ask(mcq());
+  check('a different set of switches is logged as a different combination',
+    j(res.timing.mode) === j({ provider: 'gemini-web', cache: false, parallel: false, shot: 'smart' }), j(res.timing.mode));
+
+  useWeb({ reuseChat: false, speedLog: Array.from({ length: 59 }, (_, i) => ({ at: i, total: 1, mode: {} })) });
+  await ctx.ask(mcq()); await ctx.ask(mcq()); await ctx.ask(mcq());
+  check('the log keeps the last 60 and drops the oldest', store.speedLog.length === 60 && store.speedLog[0].at === 2, j({ n: store.speedLog.length, first: store.speedLog[0]?.at }));
+
+  useWeb({ reuseChat: false });
+  genQueue = [{ ok: false, status: 429, detail: 'slow down' }];
+  res = await ctx.ask(mcq());
+  check('a question that failed still shows its timing, but is not logged', !!res.error && Number.isFinite(res.timing.total) && !(store.speedLog || []).length, j({ e: !!res.error, log: store.speedLog }));
+
+  store = { apiKey: 'sk-or-v1-abc' };
+  script(orGood('{"answer":"B","index":1}'));
+  res = await ctx.ask(mcq());
+  check('another service gets a total and none of the stages it does not have',
+    res.index === 1 && Number.isFinite(res.timing.total) && res.timing.setup === undefined && res.timing.ai === undefined && res.timing.mode.provider === 'openrouter', j(res.timing));
 
   console.log('\nOpenRouter and the others are unchanged by any of this');
   store = { apiKey: 'sk-or-v1-abc' };

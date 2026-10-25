@@ -1,7 +1,7 @@
 const FIELDS = ['provider', 'apiKey', 'model', 'fallbackModel', 'geminiKey', 'geminiModel', 'geminiFallbackModel',
                 'openaiKey', 'openaiModel', 'openaiFallbackModel',
                 'deepseekToken', 'deepseekModel', 'deepseekThinking', 'deepseekSearch',
-                'geminiWebModel', 'geminiWebFallbackModel', 'geminiWebThinking', 'geminiWebModels', 'reuseChat',
+                'geminiWebModel', 'geminiWebFallbackModel', 'geminiWebThinking', 'geminiWebModels', 'reuseChat', 'speedCache', 'speedParallel',
                 'answerDelay', 'stepDelay', 'retries', 'devMode', 'hotkeys', 'maxLessons'];
 const GEMINI_API = 'https://generativelanguage.googleapis.com/v1beta';
 const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
@@ -143,13 +143,96 @@ async function load() {
   document.getElementById('geminiWebFallbackModel').value = s.geminiWebFallbackModel || '';
   document.getElementById('geminiWebThinking').value = s.geminiWebThinking === true ? 'high' : (s.geminiWebThinking || '');
   document.getElementById('reuseChat').checked = s.reuseChat !== false;     // on unless switched off
+  document.getElementById('speedCache').checked = s.speedCache !== false;       // the speed ideas are on unless switched off
+  document.getElementById('speedParallel').checked = s.speedParallel !== false;
   showProvider();
   document.getElementById('answerDelay').value = s.answerDelay ?? 120;
   document.getElementById('stepDelay').value = s.stepDelay ?? 250;
   document.getElementById('retries').value = s.retries ?? 3;
   document.getElementById('maxLessons').value = s.maxLessons ?? 5;
   document.getElementById('devMode').checked = s.devMode === true;
+  renderSpeed();
 }
+
+/* ------------------------------------------------------------------------------- speed */
+
+const SPEED_NAMES = { openrouter: 'OpenRouter', gemini: 'Gemini key', openai: 'OpenAI', deepseek: 'DeepSeek', 'gemini-web': 'Gemini login' };
+
+/** The logged answers, averaged per combination of switches that was on when they were made, so
+ *  "with" and "without" an idea can be read side by side. A stage a service does not have is null
+ *  (shown as a dash) rather than 0, which would claim it was instant. */
+function speedSummary(log) {
+  const groups = new Map();
+  for (const e of Array.isArray(log) ? log : []) {
+    const m = e && e.mode;
+    if (!m || !Number.isFinite(e.total)) continue;
+    const web = m.provider === 'gemini-web';
+    const label = [
+      SPEED_NAMES[m.provider] || m.provider,
+      web ? `session kept ${m.cache ? 'on' : 'off'}, parallel upload ${m.parallel ? 'on' : 'off'}` : '',
+      `screenshot ${m.shot}`,
+    ].filter(Boolean).join(' · ');
+    const g = groups.get(label) || { label, n: 0, all: 0, shot: 0, stages: { setup: [0, 0], upload: [0, 0], ai: [0, 0] } };
+    g.n++;
+    g.all += e.total + (e.shot || 0);          // the capture happens before the worker is asked, so it is added on
+    g.shot += e.shot || 0;
+    for (const k of ['setup', 'upload', 'ai']) {
+      if (Number.isFinite(e[k])) { g.stages[k][0] += e[k]; g.stages[k][1]++; }
+    }
+    groups.set(label, g);
+  }
+  const avg = ([sum, n]) => (n ? sum / n : null);
+  return [...groups.values()].map(g => ({
+    label: g.label, n: g.n, all: g.all / g.n, shot: g.shot / g.n,
+    setup: avg(g.stages.setup), upload: avg(g.stages.upload), ai: avg(g.stages.ai),
+  })).sort((a, b) => a.label.localeCompare(b.label));
+}
+
+async function renderSpeed() {
+  const box = document.getElementById('speedTable');
+  box.textContent = '';
+  let log = [];
+  try { log = (await chrome.storage.local.get('speedLog')).speedLog || []; } catch { /* nothing logged */ }
+  const rows = speedSummary(log);
+  if (!rows.length) {
+    const none = document.createElement('div');
+    none.className = 'hint';
+    none.textContent = 'Nothing logged yet. Answer a few questions, then press Refresh.';
+    box.append(none);
+    return;
+  }
+
+  const sec = ms => (ms == null ? '–' : (ms / 1000).toFixed(1));
+  const table = document.createElement('table');
+  table.className = 'speed';
+  const head = table.createTHead().insertRow();
+  for (const h of ['seconds, averaged', 'n', 'per question', 'shot', 'setup', 'pic', 'ai']) {
+    const th = document.createElement('th');
+    th.textContent = h;
+    head.append(th);
+  }
+  const body = table.createTBody();
+  for (const r of rows) {
+    const tr = body.insertRow();
+    [r.label, String(r.n), sec(r.all), sec(r.shot), sec(r.setup), sec(r.upload), sec(r.ai)].forEach((text, i) => {
+      const td = tr.insertCell();
+      td.textContent = text;
+      if (i === 2) td.className = 'all';
+    });
+  }
+  box.append(table);
+}
+
+document.getElementById('speedRefresh').addEventListener('click', () => { renderSpeed(); });
+document.getElementById('speedClear').addEventListener('click', async () => {
+  try {
+    await chrome.storage.local.set({ speedLog: [] });
+    await renderSpeed();
+    status('The speed log is cleared.', 'ok');
+  } catch (e) {
+    status(`✗ ${e.message || e}`, 'bad');
+  }
+});
 
 /** Show the fields of the service that is chosen, and only those. */
 function showProvider() {
@@ -197,6 +280,8 @@ function read() {
     geminiWebFallbackModel: document.getElementById('geminiWebFallbackModel').value,
     geminiWebThinking: document.getElementById('geminiWebThinking').value,
     reuseChat: document.getElementById('reuseChat').checked,
+    speedCache: document.getElementById('speedCache').checked,
+    speedParallel: document.getElementById('speedParallel').checked,
     answerDelay: num('answerDelay', 3000),
     stepDelay: num('stepDelay', 5000),
     retries: num('retries', 10),

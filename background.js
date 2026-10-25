@@ -29,6 +29,8 @@ const DEFAULTS = {
   geminiWebThinking: '',           // '' | 'low' | 'medium' | 'high' — the site's own thinking levels; '' is standard
   geminiWebModels: [],             // the models the site says this account may use, as discovered
   reuseChat: true,                 // DeepSeek and the Gemini site: keep one chat going instead of starting a new one per question
+  speedCache: true,                // remember the Gemini session and model list between questions
+  speedParallel: true,             // upload the picture while the model list is still being fetched
   autoSubmit: true,
   openPassage: true,
   screenshot: 'auto', // 'auto' | 'always' | 'never'
@@ -74,6 +76,30 @@ async function chatSave(key, value) {
 }
 async function chatClear(key) {
   try { await chrome.storage.local.set({ [key]: null }); } catch { /* as above */ }
+}
+
+/* ------------------------------------------------------------------------- speed */
+
+/* Where a question's time goes, recorded so a change can be judged by numbers rather
+ * than by feel. Each provider adds the stages it has to `speedStages` as it goes; ask() below
+ * stamps the total on and keeps a short log of the last answers, grouped in Options by which of
+ * the speed switches were on, so "with" and "without" can be put side by side. */
+let speedStages = {};
+const SPEED_LOG_KEY = 'speedLog';
+const SPEED_LOG_MAX = 60;
+
+/** The switches that were on for this question: what a log entry is grouped by. */
+function speedMode(cfg) {
+  return { provider: cfg.provider || 'openrouter', cache: cfg.speedCache !== false, parallel: cfg.speedParallel !== false, shot: cfg.screenshot || 'auto' };
+}
+
+async function speedLogAdd(timing) {
+  try {
+    const cur = (await chrome.storage.local.get(SPEED_LOG_KEY))?.[SPEED_LOG_KEY];
+    const log = Array.isArray(cur) ? cur : [];
+    log.push({ at: Date.now(), ...timing });
+    await chrome.storage.local.set({ [SPEED_LOG_KEY]: log.slice(-SPEED_LOG_MAX) });
+  } catch { /* a missing log is only a missing statistic */ }
 }
 
 /** Whether a saved thread may be continued: it has room left, and every field in `match`
@@ -997,37 +1023,87 @@ function gwChatLost(out) {
   return !out.text;
 }
 
-/** The session, the model list, and the answer — all inside the tab. */
-async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
-  const tab = await gwTab();
-  if (!tab) {
-    throw new Error('open gemini.google.com in a tab, signed in, and leave it open — the extension borrows that tab because the login only works from there');
+/* ------------------------------------------- the Gemini session, kept between questions */
+
+/* Every question used to begin by downloading the whole gemini.google.com page to read its tokens
+ * and then asking for the model list. Neither changes from one question to the next, so both are
+ * kept for a while. They are kept in memory, and in session storage (gone when the browser
+ * closes, and never shown to a page) so a worker that was put to sleep between two questions
+ * does not forget them. A kept session is tied to one tab and one account slot, expires after
+ * ten minutes, and is thrown away and fetched again the moment the site refuses a request made
+ * with it — so being wrong about it costs one extra round trip, never a failed question. */
+const GW_SESSION_TTL = 10 * 60 * 1000;
+const GW_SESSION_KEY = 'gwSessionCache';
+let gwSessionMemo = null;
+
+/** Which tab, and which Google account slot in it, a session belongs to. */
+function gwTabKey(tab) {
+  let slot = '';
+  try { slot = /^\/u\/(\d+)(?:\/|$)/.exec(new URL(tab.url).pathname)?.[1] || ''; } catch { /* no address: no slot */ }
+  return `${tab.id}:${slot}`;
+}
+
+async function gwCacheGet(key) {
+  const fresh = e => !!e && e.key === key && Date.now() - e.at < GW_SESSION_TTL;
+  if (fresh(gwSessionMemo)) return gwSessionMemo;
+  try {
+    const e = (await chrome.storage.session.get(GW_SESSION_KEY))?.[GW_SESSION_KEY];
+    if (fresh(e)) { gwSessionMemo = e; return e; }
+  } catch { /* no session storage here: the memory copy is all there is */ }
+  return null;
+}
+async function gwCachePut(entry) {
+  gwSessionMemo = entry;
+  try { await chrome.storage.session.set({ [GW_SESSION_KEY]: entry }); } catch { /* as above */ }
+}
+async function gwCacheDrop() {
+  gwSessionMemo = null;
+  try { await chrome.storage.session.remove(GW_SESSION_KEY); } catch { /* as above */ }
+}
+
+/** The tab's session and the account's model list: the kept ones when they are fresh, otherwise
+ *  asked for. `onSession` is told the session as soon as it is known, before the model list is
+ *  fetched, so the picture upload can start beside it. Only an account that answered healthily
+ *  is kept — a barred or signed-out one is looked at again every time, as before. */
+async function gwSession(tab, cfg, { fresh = false, onSession = null } = {}) {
+  const t0 = Date.now();
+  const keep = cfg.speedCache !== false;
+  const key = gwTabKey(tab);
+  if (keep && !fresh) {
+    const hit = await gwCacheGet(key);
+    if (hit) {
+      if (onSession) onSession(hit.session);
+      return { session: hit.session, found: hit.found, cached: true, ms: Date.now() - t0 };
+    }
   }
 
   const init = await gwCall(tab.id, { type: 'gw-init' });
   if (!init.ok) throw new Error(init.detail || 'the Gemini page gave no session');
-  const session = init.session;
+  if (onSession) onSession(init.session);
 
-  const found = await gwCall(tab.id, { type: 'gw-models', session });
+  const found = await gwCall(tab.id, { type: 'gw-models', session: init.session });
   if (!found.ok) throw new Error(found.detail || 'the model list could not be read');
 
-  // A saved list is kept so Options can offer the account's real models without asking again.
-  const models = (found.models || []).map(m => ({ ...m, ...found.capacity }));
-  if (models.length && JSON.stringify(models) !== JSON.stringify(cfg.geminiWebModels || [])) {
-    try { await chrome.storage.local.set({ geminiWebModels: models }); } catch { /* only a cache */ }
+  if (keep && found.status === 1000 && (found.models || []).length) {
+    await gwCachePut({ key, at: Date.now(), session: init.session, found });
   }
+  return { session: init.session, found, cached: false, ms: Date.now() - t0 };
+}
 
-  // An empty model box means the account's own default, which the site picks when no model
-  // header is sent. That is the safest choice: it is always available to every account.
-  const wanted = String(modelName || '').trim().toLowerCase();
-  const model = wanted
-    ? models.find(m => m.name.toLowerCase() === wanted || m.label.toLowerCase() === wanted || m.id.toLowerCase() === wanted)
-      || models.find(m => m.name.toLowerCase().includes(wanted) || wanted.includes(m.name.toLowerCase()))
-    : null;
+/** Whether a reply looks like the site refusing the session itself, as opposed to the question. */
+function gwSessionStale(out) {
+  if (!out) return false;
+  if (!out.ok) return [400, 401, 403].includes(out.status);
+  return !!out.failure && out.code === -1;
+}
 
-  if (wanted && !model) {
-    return { ok: false, status: 400, text: async () => JSON.stringify({
-      error: { message: `this account has no model called ${modelName}; Options lists the ones it has` } }) };
+/** The session, the model list, and the answer — all inside the tab. */
+async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
+  const stage = speedStages;                       // this question's timings (see "speed")
+  const tStart = Date.now();
+  const tab = await gwTab();
+  if (!tab) {
+    throw new Error('open gemini.google.com in a tab, signed in, and leave it open — the extension borrows that tab because the login only works from there');
   }
 
   const user = body.messages[1];
@@ -1035,11 +1111,55 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
   const prompt = [body.messages[0].content, '', ...user.content.filter(c => c.type === 'text').map(c => c.text)].join('\n');
 
   // A picture is uploaded to the site first and referenced by the address it hands back; the
-  // site's own chat reads images, so unlike DeepSeek these are not thrown away.
-  let fileData = null;
+  // site's own chat reads images, so unlike DeepSeek these are not thrown away. The upload needs
+  // only the page's push id, so with the "parallel" switch on it starts the moment the session
+  // is known and runs while the model list is still being fetched, not after it.
   const shot = user.content.find(c => c.type === 'image_url')?.image_url?.url;
+  let uploading = null;
+  const startUpload = session => {
+    if (!shot || uploading) return uploading;
+    const t = Date.now();
+    uploading = gwUpload(shot, session.push)
+      .catch(e => ({ ok: false, detail: String(e?.message || e) }))
+      .then(up => { stage.upload = (stage.upload || 0) + (Date.now() - t); return up; });
+    return uploading;
+  };
+
+  let sess = await gwSession(tab, cfg, { onSession: cfg.speedParallel !== false ? startUpload : null });
+
+  // An empty model box means the account's own default, which the site picks when no model
+  // header is sent. That is the safest choice: it is always available to every account.
+  const wanted = String(modelName || '').trim().toLowerCase();
+  const pick = found => {
+    const all = (found.models || []).map(m => ({ ...m, ...found.capacity }));
+    const one = wanted
+      ? all.find(m => m.name.toLowerCase() === wanted || m.label.toLowerCase() === wanted || m.id.toLowerCase() === wanted)
+        || all.find(m => m.name.toLowerCase().includes(wanted) || wanted.includes(m.name.toLowerCase()))
+      : null;
+    return { models: all, model: one };
+  };
+  let { models, model } = pick(sess.found);
+  // A model missing from a remembered list may have been added since: look again before saying no.
+  if (wanted && !model && sess.cached) {
+    sess = await gwSession(tab, cfg, { fresh: true });
+    ({ models, model } = pick(sess.found));
+  }
+
+  // A saved list is kept so Options can offer the account's real models without asking again.
+  if (!sess.cached && models.length && JSON.stringify(models) !== JSON.stringify(cfg.geminiWebModels || [])) {
+    try { await chrome.storage.local.set({ geminiWebModels: models }); } catch { /* only a cache */ }
+  }
+
+  if (wanted && !model) {
+    return { ok: false, status: 400, text: async () => JSON.stringify({
+      error: { message: `this account has no model called ${modelName}; Options lists the ones it has` } }) };
+  }
+  stage.setup = (stage.setup || 0) + (Date.now() - tStart);
+  stage.cached = sess.cached;
+
+  let fileData = null;
   if (shot) {
-    const up = await gwUpload(shot, session.push);
+    const up = await (uploading || startUpload(sess.session));
     if (!up.ok) {
       return { ok: false, status: 400, text: async () => JSON.stringify({
         error: { message: `the image could not be attached: ${up.detail || 'unknown reason'}` } }) };
@@ -1051,13 +1171,13 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
   // It is only continued while it is the same account and the same model it was started with.
   const reuse = cfg.reuseChat !== false;
   const modelKey = model?.id || '';
-  const accountKey = session.account || '';
+  const accountKey = sess.session.account || '';
   let saved = reuse ? await chatLoad(GW_CHAT_KEY) : null;
   if (saved && !(saved.cid && saved.rid && saved.rcid && chatUsable(saved, { account: accountKey, model: modelKey }))) saved = null;
 
   const generate = chat => gwCall(tab.id, {
     type: 'gw-generate',
-    session,
+    session: sess.session,
     prompt,
     model,
     // The retry that follows a reply cut off mid-thought asks for less thinking rather than the
@@ -1067,7 +1187,17 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
     chat: chat ? [chat.cid, chat.rid, chat.rcid] : null,
   });
 
+  const tGen = Date.now();
   let out = await generate(saved);
+  // A remembered session the site no longer accepts shows up as a refused request. Ask again with
+  // a fresh one before blaming the conversation, the account or the model; the same chat goes on.
+  if (sess.cached && gwSessionStale(out)) {
+    await gwCacheDrop();
+    sess = await gwSession(tab, cfg, { fresh: true });
+    ({ models, model } = pick(sess.found));
+    stage.cached = false;
+    out = await generate(saved);
+  }
   // The conversation was deleted from the site's list, or it would not be continued: ask again in
   // a fresh one, once. An empty allowance or a rate limit would fail the same way again.
   if (saved && gwChatLost(out)) {
@@ -1075,6 +1205,7 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
     saved = null;
     out = await generate(null);
   }
+  stage.ai = (stage.ai || 0) + (Date.now() - tGen);
 
   if (!out.ok) {
     return { ok: false, status: out.status || 502, text: async () => JSON.stringify({
@@ -1131,6 +1262,8 @@ async function geminiWebSelfTest() {
   if (trouble) return { error: `the login works, but ${trouble} — open gemini.google.com and sort that out` };
 
   if (!models.length) return { error: 'the login works, but no models came back — the site has probably changed' };
+  // A login that has just been proved is worth keeping, so the first real question starts warm.
+  if (found.status === 1000) await gwCachePut({ key: gwTabKey(tab), at: Date.now(), session: init.session, found });
   return { ok: true, note: `Signed in. ${models.length} model${models.length === 1 ? '' : 's'} available: ${models.map(m => m.label || m.name).join(', ')}.` };
 }
 
@@ -1311,8 +1444,25 @@ function parseAnswer(raw) {
 
 /* ------------------------------------------------------------- the call */
 
+/** One question, timed. The work is askCore(); this stamps the whole on the answer and keeps the
+ *  numbers (see "speed"). A failed question is shown its timing but not logged: an error that
+ *  came back quickly would make a switch look faster than it is. */
 async function ask(payload) {
+  const started = Date.now();
+  speedStages = {};
+  const out = await askCore(payload);
+  if (out && typeof out === 'object') {
+    const timing = { total: Date.now() - started, ...speedStages };
+    if (Number.isFinite(payload?.shotMs)) timing.shot = Math.round(payload.shotMs);
+    out.timing = timing;
+    if (!out.error) await speedLogAdd(timing);
+  }
+  return out;
+}
+
+async function askCore(payload) {
   const cfg = await settings();
+  speedStages.mode = speedMode(cfg);
   const gemini = cfg.provider === 'gemini';
   const openai = cfg.provider === 'openai';
   const deepseek = cfg.provider === 'deepseek';

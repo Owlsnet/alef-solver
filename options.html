@@ -58,6 +58,11 @@
   button.ghost:hover { background: #2a2338; }
   #status { margin-top: 14px; font-size: 13px; min-height: 1.4em; }
   .ok { color: #7ee0a8; } .bad { color: #ff8f8f; }
+  table.speed { width: 100%; border-collapse: collapse; margin-top: 14px; font: 12px/1.4 ui-monospace, Consolas, monospace; }
+  table.speed th, table.speed td { padding: 5px 6px; text-align: right; border-bottom: 1px solid #2a2a36; }
+  table.speed th { color: #8b8ba7; font-weight: 400; }
+  table.speed th:first-child, table.speed td:first-child { text-align: left; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; color: #b8b8cc; }
+  table.speed td.all { color: #e8e8f0; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -189,6 +194,18 @@
   <div class="hint">Both of these sites list every conversation in a sidebar, so a new chat for every question fills it with hundreds of one-line threads. With this on, the questions go into one chat instead. The catch is that the chat remembers the earlier questions, which is usually harmless but can colour an answer; to keep that small, a new chat is started after 30 questions, and whenever the model or the account changes. If the chat is deleted from the site, a new one is started by itself. Turn it off for a separate chat per question.</div>
   <div class="keyrow"><button class="ghost small" id="newChat" type="button">Start a new chat with the next question</button></div>
   </div>
+
+  <h2>Speed</h2>
+  <div class="hint" style="margin-top:0">Each idea here can be switched off, so the same kind of question can be answered with and without it and the two compared. The table underneath averages the last questions, grouped by which switches were on. A third idea is in the popup: Screenshot → “Smart” takes a picture only when the words are not enough (a figure, a picture answer, a question that is itself a picture, or one that names a passage that was not read), and goes without for an ordinary question. Try it on a lesson and watch whether any answer comes out wrong where the page needed a picture; if so, put it back on Auto.</div>
+
+  <label class="check" for="speedCache"><input id="speedCache" type="checkbox"> Remember the Gemini session between questions</label>
+  <div class="hint">Skips downloading the whole Gemini page and asking for the model list before every question. Kept for ten minutes per tab and account, and dropped and fetched again at once if the site refuses it. Only affects “Google Gemini — your own login”.</div>
+
+  <label class="check" for="speedParallel"><input id="speedParallel" type="checkbox"> Upload the screenshot while the model list loads</label>
+  <div class="hint">Starts the picture upload as soon as the session is known instead of after the model list. With the switch above on, the list is already remembered after the first question, so this only helps that first question and the one after a ten-minute gap; to compare it by itself, switch the one above off. Only affects the Gemini login.</div>
+
+  <div id="speedTable"></div>
+  <div class="keyrow"><button class="ghost small" id="speedRefresh" type="button">Refresh</button><button class="ghost small" id="speedClear" type="button">Clear the log</button></div>
 
   <label for="answerDelay">Delay after clicking an answer (ms)</label>
   <input id="answerDelay" type="number" min="0" max="3000" step="20">

@@ -154,6 +154,108 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   b = await askWith({ index: 1, letter: 'B', confidence: 0.9, why: 'sees' });
   check('an answer from a model that did see it carries no such note', b.r.ok === true && b.huds.some(t => /→ B/.test(t)) && !b.huds.some(t => /could not see/.test(t)), JSON.stringify(b.huds.filter(t => /→/.test(t))));
 
+  // ------------------------------------------------------------------------------------------------
+  // When a screenshot is taken. The popup's Screenshot setting decides, and "smart" is
+  // the fast mode: a picture only when the words are not enough, the words for everything else.
+  console.log('\n=== which Screenshot setting takes a picture: the rules ===');
+  const wants = (mode, q) => J(`window.__alefSolver.wantsScreenshot(${JSON.stringify(mode)}, ${JSON.stringify({ kind: 'choice', imageCount: 0, passageLen: 0, stem: 'What is 2 + 3?', instruction: '', optionTexts: ['4', '5', '6'], ...q })})`);
+  await load('');
+  for (const [mode, q, want, why] of [
+    // always / never / nothing sensible
+    ['always', {}, true, 'always: a plain question'],
+    ['always', { kind: 'cloze', passageLen: 900 }, true, 'always: even a fill-in with a passage read'],
+    ['never', { imageCount: 3 }, false, 'never: not even for a figure'],
+    ['bogus', { imageCount: 3 }, false, 'a setting nobody defined takes none'],
+    [undefined, { imageCount: 3 }, false, 'and neither does no setting at all'],
+    // auto is what it always was
+    ['auto', {}, true, 'auto: a choice question whose passage was not read'],
+    ['auto', { passageLen: 249 }, true, 'auto: a passage just under the limit counts as not read'],
+    ['auto', { passageLen: 250 }, false, 'auto: a passage that was read makes it unnecessary'],
+    ['auto', { imageCount: 2, passageLen: 900 }, true, 'auto: a figure always justifies one'],
+    ['auto', { kind: 'cloze' }, false, 'auto: a fill-in carries its instructions in the text'],
+    ['auto', { kind: 'cloze', imageCount: 1 }, true, 'auto: unless it has a figure'],
+    // smart: the ordinary question goes without ...
+    ['smart', {}, false, 'smart: a plain question with a stem and worded answers goes without — the case it exists for'],
+    ['smart', { stem: 'ما ناتج ٢ + ٣؟', optionTexts: ['٤', '٥'] }, false, 'smart: and so does an Arabic one'],
+    ['smart', { kind: 'cloze', stem: '' }, false, 'smart: a fill-in with its words in its own parts'],
+    ['smart', { kind: 'drag', stem: '' }, false, 'smart: and drag and drop'],
+    ['smart', { stem: 'Which tablet is cheaper?' }, false, 'smart: "tablet" is not "table"'],
+    ['smart', { stem: 'Describe the imagery in line 3.' }, false, 'smart: nor "imagery" "image"'],
+    ['smart', { stem: 'Choose the answer from the options below.' }, false, 'smart: "below" alone says nothing about a figure'],
+    // ... and anything that says the words are not enough takes one
+    ['smart', { imageCount: 1 }, true, 'smart: a figure'],
+    ['smart', { kind: 'cloze', imageCount: 1 }, true, 'smart: a fill-in with a figure'],
+    ['smart', { stem: '' }, true, 'smart: an empty stem — the question is in a picture'],
+    ['smart', { stem: '  ' }, true, 'smart: a blank one'],
+    ['smart', { stem: 'Select the correct answers.', instruction: 'Select the correct answers.' }, true, 'smart: a stem that is only the instruction'],
+    ['smart', { optionTexts: ['MCQOption 1: Image content 🔍', 'MCQOption 2: Image content 🔍'] }, true, 'smart: answers that are pictures'],
+    ['smart', { optionTexts: ['4', '', '6'] }, true, 'smart: an answer with no words'],
+    ['smart', { stem: 'Which graph shows a linear function?' }, true, 'smart: a stem that names a graph'],
+    ['smart', { stem: 'Use the table to find the mean.' }, true, 'smart: ... a table'],
+    ['smart', { stem: 'ادرس الشكل ثم أجب.' }, true, 'smart: ... a figure, in Arabic'],
+    ['smart', { stem: 'ما الجدول الصحيح؟' }, true, 'smart: ... a table, in Arabic'],
+    ['smart', { kind: 'cloze', stem: 'Complete the sentences using the diagram.' }, true, 'smart: ... even for a fill-in'],
+    ['smart', { stem: 'According to the passage, who spoke first?' }, true, 'smart: a passage that was not read'],
+    ['smart', { stem: 'According to the passage, who spoke first?', passageLen: 900 }, false, 'smart: the same once the passage has been read'],
+    ['smart', { stem: 'ما الفكرة الرئيسة في الفقرة؟' }, true, 'smart: ... in Arabic'],
+    ['smart', { stem: 'ما الفكرة الرئيسة في الفقرة؟', passageLen: 900 }, false, 'smart: ... and once it has been read'],
+  ]) {
+    check(why, await wants(mode, q) === want, `${mode} ${JSON.stringify(q)}`);
+  }
+
+  // The same rules, fed what the page script really finds on the pages the author captured.
+  console.log('\n=== which Screenshot setting takes a picture: on real captured pages ===');
+  const FIX = f => 'file:///' + path.join(__dirname, f).replace(/\\/g, '/');
+  const decideOn = async (file, mode) => {
+    await s.goto(FIX(file));
+    await s.eval(`
+      window.chrome = { runtime: { sendMessage: () => Promise.resolve({}), onMessage: { addListener(){} } },
+        storage: { local: { get: (k, cb) => cb ? cb({}) : Promise.resolve({}), set: () => Promise.resolve() }, onChanged: { addListener(){} } } };
+      'ok'`, { awaitPromise: false });
+    await s.eval(CONTENT_JS, { awaitPromise: false });
+    await sleep(250);
+    return J(`(() => { const a = window.__alefSolver; const p = a.scrape();
+      return a.wantsScreenshot(${JSON.stringify(mode)}, { kind: p.kind, imageCount: p.images.length, passageLen: p.passage.length,
+        stem: p.stem, instruction: p.instruction, optionTexts: p.options.map(o => o.text) }); })()`);
+  };
+  for (const [file, auto, smart, what] of [
+    ['fixture-multi.html', true, false, 'a plain algebra question with worded answers (no passage)'],
+    ['fixture-lesson.html', true, true, 'a question about a passage that was not read'],
+    ['fixture-table.html', false, false, 'the same question once the passage has been read'],
+    ['fixture-locked.html', true, true, 'an Arabic question about a passage that was not read'],
+    ['fixture-pictures.html', true, true, 'a picture-choice question: no stem, answers that are pictures'],
+    ['fixture-cloze.html', false, false, 'a fill-in-the-blank'],
+    ['fixture-dropdown.html', false, false, 'a drop-down question'],
+  ]) {
+    check(`auto on ${what}: ${auto ? 'takes one' : 'goes without'}`, await decideOn(file, 'auto') === auto, file);
+    check(`smart on ${what}: ${smart ? 'takes one' : 'goes without'}`, await decideOn(file, 'smart') === smart, file);
+  }
+
+  // End to end on the picture question: does solving it ask the page for a capture, and say how long?
+  console.log('\n=== which Screenshot setting takes a picture: solving the picture question ===');
+  const solveIn = async mode => {
+    await s.goto(PAGE);
+    await s.eval(`
+      window.__sent = [];
+      window.chrome = { runtime: {
+          sendMessage: m => { window.__sent.push(m); return Promise.resolve(m && m.type === 'ask' ? { index: 1, letter: 'B', confidence: 0.9, why: 'x' } : { error: 'no capture in tests' }); },
+          onMessage: { addListener(){} } },
+        storage: { local: { get: (k, cb) => { const v = ${JSON.stringify(mode ? { screenshot: mode } : {})}; return cb ? cb(v) : Promise.resolve(v); }, set: () => Promise.resolve() }, onChanged: { addListener(){} } } };
+      'ok'`, { awaitPromise: false });
+    await s.eval(CONTENT_JS, { awaitPromise: false });
+    await sleep(250);
+    const r = await J(`window.__alefSolver.solveOne(true)`);
+    const sent = await J(`window.__sent`);
+    return { r, captures: sent.filter(m => m.type === 'capture').length, ask: sent.find(m => m.type === 'ask') };
+  };
+  for (const [mode, expectCapture] of [['auto', true], ['smart', true], ['always', true], ['never', false]]) {
+    const t = await solveIn(mode);
+    check(`Screenshot "${mode}" ${expectCapture ? 'asks' : 'does not ask'} the page for a capture, and the question is still answered`,
+      (t.captures > 0) === expectCapture && !!t.ask && t.r.ok === true, `captures=${t.captures} answered=${!!t.ask} ok=${t.r.ok}`);
+    check(`...and the question carries a capture time ("${mode}")${expectCapture ? '' : ' of zero'}`,
+      Number.isFinite(t.ask?.payload?.shotMs) && (expectCapture || t.ask.payload.shotMs === 0), JSON.stringify(t.ask?.payload?.shotMs));
+  }
+
   s.close();
   console.log(`\n${fail === 0 ? '✓ all' : '✗'} ${pass} passed, ${fail} failed\n`);
   cleanup();
