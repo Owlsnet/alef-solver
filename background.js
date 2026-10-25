@@ -26,7 +26,7 @@ const DEFAULTS = {
   deepseekPowRound: null,          // which proof-of-work digest last answered: 1 (round 0 dropped) or 0
   geminiWebModel: '',              // '' is the account's own default model: no model header is sent at all
   geminiWebFallbackModel: '',
-  geminiWebThinking: false,        // the site's extended thinking
+  geminiWebThinking: '',           // '' | 'low' | 'medium' | 'high' — the site's own thinking levels; '' is standard
   geminiWebModels: [],             // the models the site says this account may use, as discovered
   autoSubmit: true,
   openPassage: true,
@@ -34,9 +34,17 @@ const DEFAULTS = {
   answerDelay: 120,
 };
 
+const GW_THINKING_LEVELS = ['', 'low', 'medium', 'high'];
+
 async function settings() {
   const s = await chrome.storage.local.get(Object.keys(DEFAULTS));
-  return { ...DEFAULTS, ...s };
+  const out = { ...DEFAULTS, ...s };
+  // 0.6.30 and earlier saved this as a plain on/off switch. Extended thinking is what the site
+  // now calls the "high" level, so an older `true` keeps meaning exactly what it meant before
+  // rather than falling back to standard.
+  if (out.geminiWebThinking === true) out.geminiWebThinking = 'high';
+  if (!GW_THINKING_LEVELS.includes(out.geminiWebThinking)) out.geminiWebThinking = '';
+  return out;
 }
 
 /* --------------------------------------------------------------- prompt */
@@ -785,6 +793,73 @@ async function gwCall(tabId, msg) {
   }
 }
 
+/** The upload host, the push id the page handed us, and the one header the endpoint wants that
+ *  does not depend on which upload protocol is used. */
+const GW_UPLOAD = 'https://content-push.googleapis.com/upload';
+const GW_PUSH_DEFAULT = 'feeds/mcudyrk2a4khkz';
+
+/** Google's resumable upload: ask for a destination, then put the bytes there. The plain
+ *  multipart POST below is what the original client used and still works on some accounts;
+ *  this is the newer of the two and is tried second, so a working simple upload is never
+ *  given up in favour of it. Returns the same shape either way. */
+async function gwUploadResumable(bytes, type, name, pushId) {
+  // `origin` and `referer` are not set here: a page is not allowed to write either, so the
+  // browser drops them and rules.json puts the site's own values on instead.
+  const base = {
+    'push-id': pushId || GW_PUSH_DEFAULT,
+    'x-tenant-id': 'bard-storage',
+  };
+  // The handshake and the "where do I put this" call carry the same set, as the site's own
+  // client sends them; only the second adds the length.
+  const start = {
+    ...base,
+    'x-goog-upload-protocol': 'resumable',
+    'x-goog-upload-command': 'start',
+    'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+  };
+  try {
+    // The handshake is an OPTIONS with no body; its reply names where the bytes should go.
+    await fetch(GW_UPLOAD, { method: 'OPTIONS', headers: { ...start, 'x-goog-upload-header-content-length': String(bytes.length) } });
+
+    const started = await fetch(GW_UPLOAD, {
+      method: 'POST',
+      headers: { ...start, 'x-goog-upload-header-content-length': String(bytes.length), size: String(bytes.length) },
+      body: `File name: ${name}`,
+    });
+    if (!started.ok) return { ok: false, detail: `HTTP ${started.status} asking where to put the picture` };
+
+    const dest = started.headers.get('x-goog-upload-url');
+    // Only ever send the picture back to Google, whatever the reply says: an upload address
+    // handed to us by a reply is not somewhere to post a screenshot on trust.
+    if (!dest || new URL(dest).host !== new URL(GW_UPLOAD).host) {
+      return { ok: false, detail: 'the site did not name one of its own addresses for the picture' };
+    }
+
+    // The destination gets its own handshake before the bytes, with the same headers the
+    // "start" call carried — that is what the site's own client does.
+    await fetch(dest, {
+      method: 'OPTIONS',
+      headers: { ...start, 'x-goog-upload-header-content-length': String(bytes.length), size: String(bytes.length) },
+    });
+
+    const done = await fetch(dest, {
+      method: 'POST',
+      headers: {
+        ...base,
+        'x-goog-upload-command': 'upload, finalize',
+        'x-goog-upload-offset': '0',
+        'content-type': type,
+      },
+      body: bytes,
+    });
+    if (!done.ok) return { ok: false, detail: `HTTP ${done.status} sending the picture` };
+    const id = (await done.text()).trim();
+    return id ? { ok: true, url: id, name } : { ok: false, detail: 'the upload returned no address' };
+  } catch (e) {
+    return { ok: false, detail: e.message || String(e) };
+  }
+}
+
 /** Send a picture to the site's upload endpoint and hand back the address it returns, which is
  *  what a chat request refers to an attachment by.
  *
@@ -810,17 +885,19 @@ async function gwUpload(dataUrl, pushId) {
 
   let res;
   try {
-    res = await fetch('https://content-push.googleapis.com/upload', {
+    res = await fetch(GW_UPLOAD, {
       method: 'POST',
-      headers: { 'push-id': pushId || 'feeds/mcudyrk2a4khkz', 'x-tenant-id': 'bard-storage' },
+      headers: { 'push-id': pushId || GW_PUSH_DEFAULT, 'x-tenant-id': 'bard-storage' },
       body: form,
     });
   } catch (e) {
-    return { ok: false, detail: `the picture could not be sent (${e.message || e})` };
+    return gwUploadResumable(bytes, type, name, pushId);
   }
-  if (!res.ok) return { ok: false, detail: `the site refused the picture (HTTP ${res.status})` };
+  // A refusal here is not final: some accounts answer only the resumable handshake, so the
+  // picture is offered that way before the caller is told it could not be sent.
+  if (!res.ok) return gwUploadResumable(bytes, type, name, pushId);
   const url = (await res.text()).trim();
-  if (!url) return { ok: false, detail: 'the site took the picture but returned no address' };
+  if (!url) return gwUploadResumable(bytes, type, name, pushId);
   return { ok: true, url, name };
 }
 
@@ -879,7 +956,9 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
     session,
     prompt,
     model,
-    extendedThinking: !!(cfg.geminiWebThinking && !thinkingOff),
+    // The retry that follows a reply cut off mid-thought asks for less thinking rather than the
+    // same amount; the account's own saved level is used otherwise.
+    thinking: thinkingOff ? 'low' : (cfg.geminiWebThinking || ''),
     fileData,
   });
   if (!out.ok) {

@@ -17,6 +17,9 @@ const SRC = fs.readFileSync(process.env.ALEF_GEMINI_WEB || path.join(__dirname, 
 let fetchImpl = async () => { throw new Error('no network in tests'); };
 let sent = [];
 let listener = null;                      // the message handler the page script registers, captured
+// The tab's own address. A browser signed in to more than one Google account keeps each at its
+// own `/u/<n>` slot, and the script reads this to know which one to talk to.
+let pagePath = '/app';
 const ctx = vm.createContext({
   console,
   fetch: (...a) => fetchImpl(...a),
@@ -26,6 +29,7 @@ const ctx = vm.createContext({
   Blob,
   FormData,
   URLSearchParams,
+  location: { get pathname() { return pagePath; } },
   chrome: {
     runtime: {
       onMessage: { addListener(fn) { listener = fn; } },
@@ -115,6 +119,25 @@ const errPart = code => framed([
   slots(7, { 0: 'wrb.fr', 2: JSON.stringify([]), 5: [null, null, [[null, [code]]]], 6: 'generic' }),
 ]);
 
+/** A part whose refusal is a `BardErrorInfo` block rather than a bare code — the other way the
+ *  site reports one, and the only way when the block sits somewhere else than usual. */
+const bardErrPart = code => framed([
+  slots(7, {
+    0: 'wrb.fr',
+    2: JSON.stringify([null, 'cid-1', 'rid-1', null, null, ['BardErrorInfo', code, 'blocked']]),
+    6: 'generic',
+  }),
+]);
+
+/** A part in the newer shape: no candidates at all, the answer streamed as numbered fields. */
+const streamPart = text => framed([
+  slots(7, {
+    0: 'wrb.fr',
+    2: JSON.stringify([null, ['cid-1', 'rid-1'], { 7: [text], 44: true }]),
+    6: 'generic',
+  }),
+]);
+
 (async () => {
   /* ------------------------------------------------------ reading the page's session */
   console.log('the session: the five values read out of the Gemini page');
@@ -124,9 +147,53 @@ const errPart = code => framed([
   check('the build label, session id, language and push id come too', s.bl === 'bl-1' && s.sid === 'sid-1' && s.hl === 'en' && s.push === 'feeds/xyz', j(s));
   check('the page itself is fetched, with the login attached', sent[0].url === 'https://gemini.google.com/app');
 
+  // The token is sometimes a key of one object and sometimes a `["SNlM0e","…"]` pair in another.
+  script(ok('<html><script>AF_initDataCallback({data:[["SNlM0e","PAIR-TOKEN-9"],["cfb2h","bl-9"]]});</script></html>'));
+  s = await ctx.gwInit();
+  check('a token held as a pair rather than a key is still found', s.at === 'PAIR-TOKEN-9', s.at);
+
   script(ok(PAGE('TOKEN', '', '', '')));
   s = await ctx.gwInit();
   check('a page with no language still gives a usable one', s.hl === 'en', s.hl);
+
+  /* ------------------------------------------------ which account the tab is showing */
+  // A browser signed in to several Google accounts keeps each at its own /u/<n> slot, and a
+  // request made at the wrong slot arrives for an account whose session this is not — which is
+  // what a live "the model list did not arrive" turned out to be. The slot is read from the
+  // tab's own address, so the requests are made where the tab actually is.
+  for (const [path, want] of [['/app', ''], ['/u/0/app', '0'], ['/u/1/app', '1'], ['/u/12/app', '12'], ['/u/3', '3']]) {
+    pagePath = path;
+    script(ok(PAGE()));
+    s = await ctx.gwInit();
+    check(`an address at ${path} is read as account slot ${want || '(none)'}`, s.account === want, s.account);
+  }
+
+  pagePath = '/u/1/app';
+  script(ok(PAGE()));
+  s = await ctx.gwInit();
+  check('the page is fetched inside this tab\'s own account slot',
+    sent[0].url === 'https://gemini.google.com/u/1/app', sent[0].url);
+
+  // A signed-out tab at a known slot should say which slot, so the person knows which login to fix.
+  pagePath = '/u/2/app';
+  script(ok('<html>sign in</html>'));
+  let threwSlot = '';
+  try { await ctx.gwInit(); } catch (e) { threwSlot = e.message; }
+  check('a signed-out tab names the account slot it looked in', /slot 2/.test(threwSlot), threwSlot);
+  pagePath = '/app';
+
+  // A reply carrying nothing recognisable must say what did arrive, not just that it failed.
+  script(ok(framed([slots(7, { 0: 'wrb.fr', 1: 'somethingElse', 2: JSON.stringify([]), 6: 'generic' })])));
+  let threwWhat = '';
+  try { await ctx.gwModels({ at: 'T', hl: 'en' }); } catch (e) { threwWhat = e.message; }
+  check('an unrecognised reply reports what the frames actually held, to tell the two cases apart',
+    /somethingElse/.test(threwWhat) && /1 frame/.test(threwWhat), threwWhat);
+
+  script(ok(")]}'\n\n"));
+  threwWhat = '';
+  try { await ctx.gwModels({ at: 'T', hl: 'en' }); } catch (e) { threwWhat = e.message; }
+  check('an empty reply is reported as empty rather than as a change to the site',
+    /no frames at all/.test(threwWhat), threwWhat);
 
   script(ok('<html>sign in</html>'));
   let threw = '';
@@ -148,12 +215,83 @@ const errPart = code => framed([
   let m = await ctx.gwModels({ at: 'T', bl: 'b', sid: 's', hl: 'en' });
   check('the call goes to the batchexecute endpoint', sent[0].url.startsWith('https://gemini.google.com/_/BardChatUi/data/batchexecute?'), sent[0].url);
   check('it names the user-status rpc', /rpcids=otAQ7b/.test(sent[0].url), sent[0].url);
+  check('it says the request came from the page it is pretending to be', /source-path=%2Fapp/.test(sent[0].url), sent[0].url);
   check('the access token is in the body, not the address', atOf(sent[0]) === 'T' && !sent[0].url.includes('T='), atOf(sent[0]));
   check('it sends a form body, as the site does', /^at=/.test(sent[0].body), sent[0].body.slice(0, 40));
   check('both models come back, in order', m.models.length === 2 && m.models[0].name === 'gemini-flash' && m.models[1].name === 'gemini-pro', j(m.models.map(x => x.name)));
   check('each carries the name to show and what it is for', m.models[0].label === 'Flash' && m.models[0].description === 'Fast', j(m.models[0]));
   check('each carries the model number the request body mirrors', m.models[0].number === 1 && m.models[1].number === 3, j(m.models.map(x => x.number)));
   check('a free account is tier 1', m.capacity.capacity === 1 && m.capacity.capacityField === 12, j(m.capacity));
+
+  // The slot has to ride on every call, not just the page load: a browser with several Google
+  // accounts signed in would otherwise be answered for whichever one it defaults to.
+  pagePath = '/u/1/app';
+  script(ok(PAGE()));
+  const s1 = await ctx.gwInit();
+  script(ok(statusReply(MODELS)));
+  await ctx.gwModels(s1);
+  check('the model list is asked for inside the tab\'s own account slot',
+    sent[0].url.startsWith('https://gemini.google.com/u/1/_/BardChatUi/data/batchexecute?'), sent[0].url);
+  // Including the address the site is told it came from: a request made as slot 1 that says it
+  // came from the bare path describes a different account than the one it is being made as.
+  check('and says it came from that slot\'s own page', /source-path=%2Fu%2F1%2Fapp/.test(sent[0].url), sent[0].url);
+
+  script(ok(genPart('answer')));
+  await ctx.gwGenerate(s1, { prompt: 'Q', model: { id: 'x', name: 'gemini-flash', label: 'Flash', number: 1, capacity: 1, capacityField: 12 } });
+  check('and so is the generation call — asking the bare path is not the same thing',
+    sent[0].url.startsWith('https://gemini.google.com/u/1/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?'), sent[0].url);
+  pagePath = '/app';
+
+  // The public name comes from the display name, which is what the person sees on the site —
+  // not from the category, which can differ from it.
+  script(ok(statusReply([
+    slots(18, { 0: 'id-1', 1: 'Flash Lite', 11: 'Flash Lite 2.5', 17: 1 }),
+  ])));
+  m = await ctx.gwModels({ at: 'T', hl: 'en' });
+  check('the model is named after what the site displays, not its category',
+    m.models[0].name === 'gemini-flash-lite-2.5' && m.models[0].label === 'Flash Lite 2.5', j(m.models[0]));
+
+  // An entry whose routing number is stated but unusable cannot be asked for by index; naming
+  // it while sending a made-up number would silently answer with a different model.
+  script(ok(statusReply([
+    slots(18, { 0: 'id-bad', 1: 'Broken', 11: 'Broken', 17: 0 }),
+    slots(18, { 0: 'id-ok', 1: 'Fine', 11: 'Fine', 17: 2 }),
+  ])));
+  m = await ctx.gwModels({ at: 'T', hl: 'en' });
+  check('an entry with an unusable model number is left out rather than guessed at',
+    m.models.length === 1 && m.models[0].id === 'id-ok', j(m.models.map(x => x.id)));
+
+  // The number also lives at index 9 on some entries, which is the fallback.
+  script(ok(statusReply([slots(18, { 0: 'id-9', 1: 'Nine', 11: 'Nine', 9: 5 })])));
+  m = await ctx.gwModels({ at: 'T', hl: 'en' });
+  check('the second place the site keeps the number is used when the first is empty',
+    m.models[0].number === 5, String(m.models[0].number));
+
+  // A version in the display name has to survive: "2.5 Pro" turned into "2-5-pro" is not the
+  // name of anything, and the same model listed twice has to become one entry.
+  script(ok(statusReply([
+    slots(18, { 0: 'id-25', 1: 'Pro', 11: '2.5 Pro', 17: 3 }),
+  ])));
+  m = await ctx.gwModels({ at: 'T', hl: 'en' });
+  check('a version inside the display name is kept as a version',
+    m.models[0].name === 'gemini-2.5-pro', m.models[0].name);
+
+  script(ok(statusReply([
+    slots(18, { 0: 'id-same', 1: 'Flash', 11: 'Flash', 17: 1 }),
+    slots(18, { 0: 'id-same', 1: 'Flash', 11: 'Flash', 17: 1 }),
+  ])));
+  m = await ctx.gwModels({ at: 'T', hl: 'en' });
+  check('the same model listed twice becomes one entry', m.models.length === 1, j(m.models.length));
+
+  // Two different entries the site happens to display under one name must stay told apart,
+  // or choosing one of them in Options would silently pick the other.
+  script(ok(statusReply([
+    slots(18, { 0: 'id-aaa111', 1: 'Flash', 11: 'Flash', 17: 1 }),
+    slots(18, { 0: 'id-bbb222', 1: 'Flash', 11: 'Flash', 17: 2 }),
+  ])));
+  m = await ctx.gwModels({ at: 'T', hl: 'en' });
+  check('two entries sharing a display name get names that differ',
+    m.models.length === 2 && m.models[0].name !== m.models[1].name, j(m.models.map(x => x.name)));
 
   // The account's own tier flags, which decide both the header and the model numbers.
   for (const [name, tier, caps, want] of [
@@ -182,10 +320,50 @@ const errPart = code => framed([
   try { await ctx.gwModels({ at: 'T', hl: 'en' }); } catch (e) { threw = e.message; }
   check('a session the server rejects outright is said to be rejected', /not signed in/i.test(threw), threw);
 
+  // Any non-zero code in the rejection slot means refused, not only the one code seen so far.
+  script(ok(framed([slots(7, { 0: 'wrb.fr', 1: 'otAQ7b', 5: [4], 6: 'generic' })])));
+  threw = '';
+  try { await ctx.gwModels({ at: 'T', hl: 'en' }); } catch (e) { threw = e.message; }
+  check('a rejection is a rejection whatever number it carries', /not signed in/i.test(threw), threw);
+
+  script(ok(framed([slots(7, { 0: 'wrb.fr', 1: 'otAQ7b', 5: [0], 2: JSON.stringify(slots(18, { 14: 1000, 15: MODELS })), 6: 'generic' })])));
+  check('a zero in that slot is not a rejection, so the call still succeeds', (await ctx.gwModels({ at: 'T', hl: 'en' })).models.length === 2);
+
   script(ok(framed([slots(7, { 0: 'wrb.fr', 1: 'somethingelse', 2: JSON.stringify([]), 6: 'generic' })])));
   threw = '';
   try { await ctx.gwModels({ at: 'T', hl: 'en' }); } catch (e) { threw = e.message; }
-  check('a reply with no status in it is not silently treated as fine', /has probably changed/i.test(threw), threw);
+  check('a reply with no status in it is not silently treated as fine', /did not arrive/i.test(threw), threw);
+  // And the failure has to say what did turn up, so a report is enough to diagnose it.
+  check('and it describes the frames that did arrive, without quoting them',
+    /1 frame \(rpc ids: somethingelse; largest part 2 chars\)/.test(threw), threw);
+
+  script(ok(framed([])));
+  threw = '';
+  try { await ctx.gwModels({ at: 'T', hl: 'en' }); } catch (e) { threw = e.message; }
+  check('an entirely empty reply is described as such, not as a change', /no frames at all/.test(threw), threw);
+
+  // An `er` frame carries the error as a bare number where a status would be. Running that
+  // through JSON.parse used to turn it into a "successful" reply with no models in it.
+  script(ok(framed([slots(7, { 0: 'er', 1: 'otAQ7b', 2: 3, 6: 'generic' })])));
+  threw = '';
+  let erResult = null;
+  try { erResult = await ctx.gwModels({ at: 'T', hl: 'en' }); } catch (e) { threw = e.message; }
+  check('an error frame for the status call is an error, not an empty success', !erResult && /reported an error for the model-list call \(code 3\)/.test(threw), threw || j(erResult));
+
+  script(ok(framed([slots(7, { 0: 'wrb.fr', 1: 'otAQ7b', 2: slots(18, { 14: 1000, 15: MODELS }), 6: 'generic' })])));
+  m = await ctx.gwModels({ at: 'T', hl: 'en' });
+  check('a status that arrives already decoded (a list, not a string) is read too', m.models.length === 2 && m.status === 1000, j(m.models.length));
+
+  script(ok('<!doctype html><html><body>Sign in</body></html>'));
+  threw = '';
+  try { await ctx.gwModels({ at: 'T', hl: 'en' }); } catch (e) { threw = e.message; }
+  check('a web page where data should be is called a web page, not an empty reply',
+    /no frames at all/.test(threw) && /look like a web page/.test(threw) && !/Sign in/.test(threw), threw);
+
+  script(ok(framed([slots(7, { 0: 'er', 1: 'somethingelse', 2: 9, 6: 'generic' })])));
+  threw = '';
+  try { await ctx.gwModels({ at: 'T', hl: 'en' }); } catch (e) { threw = e.message; }
+  check('a frame that is not the usual kind is named in the description', /other markers: er/.test(threw), threw);
 
   /* -------------------------------------------------------------- the frames */
   console.log('\nthe reply frames: Google lengths them rather than delimiting them');
@@ -203,11 +381,41 @@ const errPart = code => framed([
   check('frames survive being fed the whole reply at once', ctx.gwFrames(genPart('x')).length === 1);
   check('rubbish in the middle does not lose the good frames', ctx.gwFrames(")]}'\n\n5\n{oops" + genPart('good').slice(5)).length === 1);
 
+  // The declared count is a hint, not a boundary. Whatever it counts — bytes, UTF-16 units, with
+  // or without the newline — a frame must be cut where its brackets close, or one miscount on
+  // non-ASCII text loses every frame after it. These are the shapes that would break a slicer.
+  const arabic = JSON.stringify([['wrb.fr', 'rpc', JSON.stringify(['الإجابة الصحيحة هي ب', 'ثانيا'])]]);
+  const second = JSON.stringify([['di', 42]]);
+  const inBytes = `)]}'\n\n${Buffer.byteLength(arabic)}\n${arabic}\n${Buffer.byteLength(second)}\n${second}`;
+  check('a count made in bytes (larger than the characters) does not cut the next frame off',
+    ctx.gwFrames(inBytes).length === 2 && ctx.gwFrames(inBytes)[1][0] === 'di', j(ctx.gwFrames(inBytes).map(p => p[0])));
+  check('and the Arabic text itself arrives intact',
+    JSON.parse(ctx.gwFrames(inBytes)[0][2])[0] === 'الإجابة الصحيحة هي ب');
+
+  const tooSmall = `)]}'\n\n3\n${second}\n\n3\n${second}`;
+  check('a count that is too small does not truncate a frame', ctx.gwFrames(tooSmall).length === 2, j(ctx.gwFrames(tooSmall).length));
+  const tooBig = `)]}'\n\n9999\n${second}\n\n9999\n${second}`;
+  check('a count that is too big does not swallow the next frame', ctx.gwFrames(tooBig).length === 2, j(ctx.gwFrames(tooBig).length));
+  check('no count at all is fine: a bare list is a frame', ctx.gwFrames(`)]}'${second}`).length === 1);
+
+  const spread = '[\n  ["wrb.fr",\n   "rpc",\n   "x"]\n,\n  ["di", 1]\n]';
+  check('a frame spread over several lines is one frame', ctx.gwFrames(`)]}'\n\n40\n${spread}`).length === 2, j(ctx.gwFrames(`)]}'\n\n40\n${spread}`).length));
+
+  // A bracket or a quote inside a string must not be mistaken for structure.
+  const tricky = JSON.stringify([['a]b[c', 'say "hi" ] now', 'back\\slash"', ']']]);
+  check('brackets and escaped quotes inside strings do not end a frame early',
+    j(ctx.gwFrames(`)]}'\n\n9\n${tricky}`)) === j([['a]b[c', 'say "hi" ] now', 'back\\slash"', ']']]), j(ctx.gwFrames(`)]}'\n\n9\n${tricky}`)));
+
+  const half = `)]}'\n\n${second.length}\n${second}\n\n500\n[["wrb.fr","rpc","cut off here`;
+  check('a reply cut off mid-frame keeps the frames before it', ctx.gwFrames(half).length === 1, j(ctx.gwFrames(half).length));
+  check('leading whitespace before the guard is tolerated', ctx.gwFrames(`\n  ${one}`).length === 1);
+  check('a page that is not data yields no frames rather than throwing', ctx.gwFrames('<html><body>sign in</body></html>').length === 0);
+
   /* ------------------------------------------------------------- the request body */
   console.log('\nthe request: an 81-slot body, and a header that names the model');
   script(ok(genPart('the answer')));
   const model = { id: 'id-flash', name: 'gemini-flash', label: 'Flash', number: 1, capacity: 1, capacityField: 12 };
-  let out = await ctx.gwGenerate({ at: 'TOKEN', hl: 'en', bl: 'b', sid: 's' }, { prompt: 'Q?', model, extendedThinking: false });
+  let out = await ctx.gwGenerate({ at: 'TOKEN', hl: 'en', bl: 'b', sid: 's' }, { prompt: 'Q?', model });
   const gen = sent.find(c => c.url.includes('StreamGenerate'));
   check('the generation call goes to the site\'s own endpoint', !!gen);
   check('the model is named in the header, not the address', gen.headers['x-goog-ext-525001261-jspb'].includes('"id-flash"') && !gen.url.includes('id-flash'), gen.headers['x-goog-ext-525001261-jspb']);
@@ -221,18 +429,33 @@ const errPart = code => framed([
   check('slot 0 is the prompt, as a block of its own', Array.isArray(inner[0]) && inner[0][0] === 'Q?', j(inner[0]));
   check('streaming is asked for', inner[7] === 1);
   check('the model number is mirrored into slot 79', inner[79] === 1, String(inner[79]));
-  check('standard thinking is 1 in slot 80', inner[80] === 1, String(inner[80]));
+  check('an unnamed thinking level is the standard one', inner[80] === 1, String(inner[80]));
   check('the slots the site leaves empty are left empty', inner.filter(x => x === null).length > 50, String(inner.filter(x => x === null).length));
   check('the conversation metadata is the site\'s own empty shape', j(inner[2]) === j(['', '', '', null, null, null, null, null, null, '']), j(inner[2]));
 
-  script(ok(genPart('x')));
-  await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q?', model, extendedThinking: true });
-  const gen2 = sent.find(c => c.url.includes('StreamGenerate'));
-  check('extended thinking is 2 in slot 80', JSON.parse(reqOf(gen2)[1])[80] === 2);
-  check('and is mirrored in the model header', gen2.headers['x-goog-ext-525001261-jspb'].includes(',2,'), gen2.headers['x-goog-ext-525001261-jspb']);
+  // The site numbers its thinking levels out of order — medium is 4, high is 2 — so the words
+  // are mapped here rather than passed straight through.
+  for (const [level, wire, where] of [['low', 1, 'low'], ['medium', 4, 'medium'], ['high', 2, 'extended']]) {
+    script(ok(genPart('x')));
+    await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q?', model, thinking: level });
+    const g = sent.find(c => c.url.includes('StreamGenerate'));
+    check(`${where} thinking is ${wire} in slot 80 and the header`,
+      JSON.parse(reqOf(g)[1])[80] === wire && g.headers['x-goog-ext-525001261-jspb'].includes(`,${wire},`),
+      g.headers['x-goog-ext-525001261-jspb']);
+  }
 
   script(ok(genPart('x')));
-  await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q?', model: null, extendedThinking: false });
+  await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q?', model, thinking: 'HIGH' });
+  check('a level is read whatever case it arrives in',
+    JSON.parse(reqOf(sent.find(c => c.url.includes('StreamGenerate')))[1])[80] === 2);
+
+  script(ok(genPart('x')));
+  await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q?', model, thinking: 'nonsense' });
+  check('an unknown level is the standard one, not a broken request',
+    JSON.parse(reqOf(sent.find(c => c.url.includes('StreamGenerate')))[1])[80] === 1);
+
+  script(ok(genPart('x')));
+  await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q?', model: null });
   const gen3 = sent.find(c => c.url.includes('StreamGenerate'));
   check('with no model chosen, no model header is sent at all — the site picks', !gen3.headers['x-goog-ext-525001261-jspb']);
   check('and no model number is claimed in the body', JSON.parse(reqOf(gen3)[1])[79] === 1);
@@ -245,7 +468,7 @@ const errPart = code => framed([
   /* ------------------------------------------------------------- reading the answer */
   console.log('\nreading the answer out of a stream of frames');
   script(ok(genPart('final answer here')));
-  out = await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q', model, extendedThinking: false });
+  out = await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q', model });
   check('the answer text is taken from the candidate', out.text === 'final answer here', out.text);
   check('a finished turn is marked done', out.done === true);
   check('the conversation ids come back for reference', out.cid === 'r-1' && out.rid === 'rid-1' && out.rcid === 'rc-1', j([out.cid, out.rid, out.rcid]));
@@ -267,6 +490,40 @@ const errPart = code => framed([
   script(ok(errPart(1037)));
   out = await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q', model });
   check('the allowance being used up is read as an error code, not as an empty answer', out.code === 1037, String(out.code));
+
+  // The site reports a refusal either as a bare code or as a BardErrorInfo block, and only the
+  // block covers the versions that keep it somewhere other than slot 5.
+  script(ok(bardErrPart(1037)));
+  out = await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q', model });
+  check('a refusal sent as a BardErrorInfo block is read too', out.code === 1037, String(out.code));
+
+  // A block that names itself but carries no number is still a refusal, and must not surface
+  // as the meaningless "error -1".
+  script(ok(framed([slots(7, { 0: 'wrb.fr', 2: JSON.stringify(['BardErrorInfo']), 6: 'generic' })])));
+  const noCode = await ask({ type: 'gw-generate', session: { at: 'T', hl: 'en' }, prompt: 'Q', model });
+  check('a refusal with no code is described, not numbered', /refused the question/.test(noCode.failure || ''), noCode.failure);
+
+  // A reply where the answer is streamed as numbered fields instead of candidates.
+  script(ok(streamPart('streamed answer')));
+  out = await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q', model });
+  check('an answer sent as numbered fields rather than candidates is still read',
+    out.text === 'streamed answer', out.text);
+
+  // Reasoning is usually its own field, but some replies weave it into the text between two
+  // control characters, where it has to be cut out rather than left in the answer.
+  script(ok(genPart('the answer<ctrl94>thoughtweighing it up<ctrl95>')));
+  out = await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q', model });
+  check('reasoning woven into the text is separated out', out.thoughts === 'weighing it up', out.thoughts);
+  check('and what is left is the answer alone', out.text === 'the answer', out.text);
+
+  script(ok(genPart('before<ctrl94>thoughtmid-thought')));
+  out = await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q', model });
+  check('a reply cut off mid-thought still yields the part before it', out.text === 'before', out.text);
+  check('and the unfinished thought is not thrown away', out.thoughts === 'mid-thought', out.thoughts);
+
+  script(ok(genPart('no markers here at all')));
+  out = await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q', model });
+  check('an answer with no markers is passed through untouched', out.text === 'no markers here at all' && out.thoughts === '', j({ t: out.text, th: out.thoughts }));
 
   script(fail_(429, 'rate limited'));
   out = await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q', model });

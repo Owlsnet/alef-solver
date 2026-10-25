@@ -1,7 +1,7 @@
 const FIELDS = ['provider', 'apiKey', 'model', 'fallbackModel', 'geminiKey', 'geminiModel', 'geminiFallbackModel',
                 'openaiKey', 'openaiModel', 'openaiFallbackModel',
                 'deepseekToken', 'deepseekModel', 'deepseekThinking', 'deepseekSearch',
-                'geminiWebModel', 'geminiWebFallbackModel', 'geminiWebThinking',
+                'geminiWebModel', 'geminiWebFallbackModel', 'geminiWebThinking', 'geminiWebModels',
                 'answerDelay', 'stepDelay', 'retries', 'devMode', 'hotkeys', 'maxLessons'];
 const GEMINI_API = 'https://generativelanguage.googleapis.com/v1beta';
 const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
@@ -138,10 +138,10 @@ async function load() {
   document.getElementById('deepseekModel').value = s.deepseekModel || 'deepseek-chat';
   document.getElementById('deepseekThinking').checked = s.deepseekThinking === true;
   document.getElementById('deepseekSearch').checked = s.deepseekSearch === true;
-  renderGeminiWebModels(s.geminiWebModels || []);
+  renderGeminiWebModels(s.geminiWebModels || [], s.geminiWebModel || '', s.geminiWebFallbackModel || '');
   document.getElementById('geminiWebModel').value = s.geminiWebModel || '';
   document.getElementById('geminiWebFallbackModel').value = s.geminiWebFallbackModel || '';
-  document.getElementById('geminiWebThinking').checked = s.geminiWebThinking === true;
+  document.getElementById('geminiWebThinking').value = s.geminiWebThinking === true ? 'high' : (s.geminiWebThinking || '');
   showProvider();
   document.getElementById('answerDelay').value = s.answerDelay ?? 120;
   document.getElementById('stepDelay').value = s.stepDelay ?? 250;
@@ -158,6 +158,9 @@ function showProvider() {
   document.getElementById('openaiFields').hidden = which !== 'openai';
   document.getElementById('deepseekFields').hidden = which !== 'deepseek';
   document.getElementById('geminiWebFields').hidden = which !== 'gemini-web';
+  // There is no key to test for the Gemini-site login, so the button says what it actually does
+  // there. Its own hint tells the person to press this by name, so the two must agree.
+  document.getElementById('test').textContent = which === 'gemini-web' ? 'Test login' : 'Test key';
 }
 document.getElementById('provider').addEventListener('change', () => { showProvider(); status('Press Save to switch.'); });
 
@@ -189,7 +192,7 @@ function read() {
     deepseekSearch: document.getElementById('deepseekSearch').checked,
     geminiWebModel: document.getElementById('geminiWebModel').value,
     geminiWebFallbackModel: document.getElementById('geminiWebFallbackModel').value,
-    geminiWebThinking: document.getElementById('geminiWebThinking').checked,
+    geminiWebThinking: document.getElementById('geminiWebThinking').value,
     answerDelay: num('answerDelay', 3000),
     stepDelay: num('stepDelay', 5000),
     retries: num('retries', 10),
@@ -372,11 +375,15 @@ async function testDeepseek() {
 
 /** The models the site said this account may use, as two drop-downs. The saved list is kept in
  *  storage by the service worker, so the boxes are useful on a later visit without asking the
- *  site again — and if the list is empty the boxes still offer the default, which always works. */
-function renderGeminiWebModels(models) {
+ *  site again — and if the list is empty the boxes still offer the default, which always works.
+ *
+ *  `keepMain`/`keepFall` are the values to stay on, and are given by the caller because this
+ *  rebuilds both boxes from scratch: reading the current selection instead would only work when
+ *  the box already shows it, and on a fresh page load it does not yet. */
+function renderGeminiWebModels(models, keepMain = document.getElementById('geminiWebModel').value,
+                                        keepFall = document.getElementById('geminiWebFallbackModel').value) {
   const main = document.getElementById('geminiWebModel');
   const fall = document.getElementById('geminiWebFallbackModel');
-  const keepMain = main.value, keepFall = fall.value;
 
   main.textContent = '';
   const dflt = document.createElement('option');

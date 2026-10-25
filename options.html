@@ -172,8 +172,14 @@
   </select>
   <div class="hint">Tried if the first one is out of allowance. The account's limit is shared across its models, so this helps least here — but a different model sometimes still answers.</div>
 
-  <label class="check" for="geminiWebThinking"><input id="geminiWebThinking" type="checkbox"> Extended thinking</label>
-  <div class="hint">Lets it reason for longer before answering. Slower, and it uses the account's allowance faster.</div>
+  <label for="geminiWebThinking">Thinking</label>
+  <select id="geminiWebThinking">
+    <option value="">Standard (default)</option>
+    <option value="low">Low — quickest</option>
+    <option value="medium">Medium</option>
+    <option value="high">Extended — thinks longest</option>
+  </select>
+  <div class="hint">How long it reasons before answering. Higher is slower and uses the account's allowance faster. Leave it on Standard unless you have a reason not to. The site's own levels are these four, and they are not in the order you would guess — Medium is the site's 4 and Extended its 2.</div>
 
   <div class="keyrow"><button class="ghost small" id="openGemini" type="button">Open gemini.google.com</button></div>
   </div>

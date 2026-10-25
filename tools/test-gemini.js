@@ -562,6 +562,91 @@ const useGemini = (extra = {}) => { store = { provider: 'gemini', geminiKey: KEY
   check('a real question is shown as it is', /=== QUESTION ===\s+What is it\?/.test(ctx.buildText(multiQ({ stem: 'What is it?' }))));
   check('a single-answer question with no text keeps the old words', /=== QUESTION ===\s+\(no question text found\)/.test(ctx.buildText(mcq({ stem: '' }))));
 
+  console.log('\nthe thinking level saved by an older version');
+  // 0.6.30 and earlier saved the Gemini-site thinking setting as on/off, not as a level. It must
+  // keep meaning what it meant — extended thinking — rather than quietly falling back to standard.
+  for (const [saved, want, why] of [
+    [true, 'high', 'an old "extended thinking" switch comes back as the level it meant'],
+    [false, '', 'an old switch that was off comes back as standard'],
+    ['high', 'high', 'a level saves and loads as itself'],
+    ['medium', 'medium', 'the level the site puts above low is kept'],
+    ['nonsense', '', 'a level that is not one of the site\'s falls back to standard'],
+    [undefined, '', 'nothing saved is standard'],
+  ]) {
+    store = { provider: 'gemini-web', geminiWebThinking: saved };
+    check(why, (await ctx.settings())?.geminiWebThinking === want, j((await ctx.settings())?.geminiWebThinking));
+  }
+
+  console.log('\nthe picture upload: the plain way, and the newer one behind it');
+  // Nothing else here touches an upload, so the pieces it uses are given to the sandbox now.
+  ctx.URL = URL; ctx.TextEncoder = TextEncoder; ctx.FormData = FormData; ctx.Blob = Blob;
+  ctx.atob = s => Buffer.from(s, 'base64').toString('binary');
+
+  /** Record upload calls without touching the body: an upload body is bytes or a form, which
+   *  the JSON-recording helper above would choke on. */
+  const upScript = (...replies) => {
+    const calls = [];
+    fetchImpl = async (url, init) => {
+      calls.push({ url: String(url), method: init?.method, headers: init?.headers || {}, body: init?.body });
+      const r = replies[Math.min(calls.length - 1, replies.length - 1)];
+      if (typeof r === 'function') return r(calls[calls.length - 1]);
+      if (r && r.throw) throw new Error(r.throw);
+      return r;
+    };
+    return calls;
+  };
+  const upOk = body => ({ ok: true, status: 200, text: async () => body });
+  const upFail = status => ({ ok: false, status, text: async () => '' });
+  const upStart = dest => ({ ok: true, status: 200, headers: { get: h => (h.toLowerCase() === 'x-goog-upload-url' ? dest : null) }, text: async () => '' });
+  const PIC = 'data:image/jpeg;base64,QUFBQQ==';
+
+  // The plain multipart route, which is what this did before: one POST, the address in the reply.
+  let up = upScript(upOk('https://x/y'));
+  let ur = await ctx.gwUpload(PIC, 'feeds/abc');
+  check('a picture goes to the upload endpoint the site uses, with the push id the page gave',
+    ur.ok && ur.url === 'https://x/y' && up[0].url === 'https://content-push.googleapis.com/upload' && up[0].headers['push-id'] === 'feeds/abc', j({ u: up[0].url, p: up[0].headers['push-id'] }));
+  check('and is named as an image so the site can read it back',
+    /^input_\d+\.jpeg$/.test(ur.name), ur.name);
+  check('with no push id from the page, the site\'s own default is used',
+    (up = upScript(upOk('https://x/y')), await ctx.gwUpload(PIC), up[0].headers['push-id'] === 'feeds/mcudyrk2a4khkz'));
+
+  // A refusal, a dead network, or an empty reply is not the end: the resumable handshake is tried.
+  up = upScript(upFail(404), upOk(''), upStart('https://content-push.googleapis.com/upload/session'), upOk('/contrib_service/ttl_1d/abc'));
+  ur = await ctx.gwUpload(PIC, 'feeds/abc');
+  check('an upload the plain way is refused for falls through to the newer handshake and still succeeds',
+    ur.ok && ur.url === '/contrib_service/ttl_1d/abc', j(ur));
+  check('which asks where to put it first, then sends the bytes there',
+    up[1].method === 'OPTIONS' && up[2].method === 'POST' && /^File name: input_/.test(String(up[2].body)) &&
+    up[3].url === 'https://content-push.googleapis.com/upload/session' && up[3].method === 'OPTIONS' &&
+    up[4].url === 'https://content-push.googleapis.com/upload/session' && up[4].headers['x-goog-upload-command'] === 'upload, finalize',
+    j({ m1: up[1].method, m2: up[2].method, m3: up[3].method, u4: up[4].url, c4: up[4].headers['x-goog-upload-command'] }));
+  check('and tells the endpoint how large the picture is, as the site does',
+    up[2].headers.size === '4' && up[2].headers['x-goog-upload-header-content-length'] === '4',
+    j({ s: up[2].headers.size, l: up[2].headers['x-goog-upload-header-content-length'] }));
+  check('the bytes go to the destination, not to the original endpoint',
+    up[4].url === 'https://content-push.googleapis.com/upload/session' && !up.slice(3).some(c => c.url === 'https://content-push.googleapis.com/upload'),
+    j(up.slice(3).map(c => c.url)));
+
+  // An upload address is a reply's word for where the bytes go. It must be Google's own host and
+  // nothing else, or a screenshot would be posted wherever a reply pointed.
+  up = upScript(upFail(404), upOk(''), upStart('https://evil.example.com/collect'), upOk('nope'));
+  ur = await ctx.gwUpload(PIC, 'feeds/abc');
+  check('an upload address that is not the site\'s own host is refused, and the picture is not sent there',
+    !ur.ok && !up.some(c => c.url.includes('evil.example.com')), j({ ok: ur.ok, d: ur.detail }));
+
+  up = upScript(upFail(404), upOk(''), upFail(500));
+  ur = await ctx.gwUpload(PIC, 'feeds/abc');
+  check('a handshake that fails too is reported plainly', !ur.ok && /HTTP 500/.test(ur.detail || ''), ur.detail);
+
+  up = upScript({ throw: 'offline' }, upOk(''), upStart('https://content-push.googleapis.com/u/1'), upOk('/x'));
+  ur = await ctx.gwUpload(PIC, 'feeds/abc');
+  check('a network that is down altogether is retried the other way rather than given up on',
+    ur.ok && ur.url === '/x', j(ur));
+
+  up = upScript(upOk('https://x/y'));
+  ur = await ctx.gwUpload('not a data url at all', 'feeds/abc');
+  check('something that is not a picture at all is refused before any request', !ur.ok && up.length === 0, ur.detail);
+
   console.log(`\n${fail === 0 ? '✓ all' : '✗'} ${pass} passed, ${fail} failed\n`);
   process.exit(fail === 0 ? 0 : 1);
 })().catch(e => { console.error('✗ harness error:', e && e.stack || e); process.exit(1); });

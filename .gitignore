@@ -3,6 +3,9 @@
 .tmp/
 node_modules/
 
+# Written into the folder by Chrome itself when the extension is loaded unpacked
+_metadata/
+
 # An API key kept in a file for tools/solve.js, never to be committed
 .key.txt
 *.key

@@ -37,12 +37,15 @@ const chromeExe = [
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const KEY = 'AIzaSy-SECRET-TEST-KEY-0123456789';
 
-/** The extension's storage and the network, scripted. `window.__replies` is a queue: each fetch
- *  takes the next one. */
+/** The extension's storage, its messages to the service worker, and the network, all scripted.
+ *  `window.__replies` is a queue for fetches and `window.__msgReplies` one for messages: each
+ *  call takes the next. */
 const STUB = (store = {}) => `
   window.__store = ${JSON.stringify(store)};
-  window.__fetches = []; window.__replies = [];
-  window.chrome = { runtime: { getManifest: () => ({ version: '9.9.9' }) },
+  window.__fetches = []; window.__replies = []; window.__msgReplies = []; window.__msgSent = [];
+  window.chrome = { tabs: { create: async o => { window.__msgSent.push({ tab: o.url }); return { id: 1 }; } },
+    runtime: { getManifest: () => ({ version: '9.9.9' }),
+      sendMessage: async m => { window.__msgSent.push({ type: m.type, keys: Object.keys(m).sort() }); return window.__msgReplies.shift(); } },
     storage: { local: {
       get: async k => { const o = {}; for (const x of [].concat(k)) if (x in window.__store) o[x] = window.__store[x]; return o; },
       set: async o => { Object.assign(window.__store, o); },
@@ -93,6 +96,8 @@ const STUB = (store = {}) => `
   const status = () => ev(`document.getElementById('status').textContent`);
   const click = async id => { await ev(`document.getElementById('${id}').click(); 'ok'`); await sleep(250); };
   const reply = r => ev(`window.__replies.push(${JSON.stringify(r)}); 'ok'`);
+  const msgReply = r => ev(`window.__msgReplies.push(${JSON.stringify(r)}); 'ok'`);
+  const messages = () => ev(`JSON.stringify(window.__msgSent)`).then(JSON.parse);
   const fetches = () => ev(`JSON.stringify(window.__fetches)`).then(JSON.parse);
   const choose = v => ev(`(() => { const e = document.getElementById('provider'); e.value = ${JSON.stringify(v)}; e.dispatchEvent(new Event('change', { bubbles: true })); return 'ok'; })()`);
 
@@ -262,6 +267,94 @@ const STUB = (store = {}) => `
   await open({ provider: 'openai' });
   await click('test');
   check('with no key it asks for one, and sends nothing', await status() === 'Paste an OpenAI key first.' && (await fetches()).length === 0, await status());
+
+  /* --------------------------------------------------- the Gemini-site login */
+  console.log('\n=== Gemini (your own site login): fields and the model list ===');
+  await open({});
+  await choose('gemini-web');
+  check('choosing it shows its fields and only those',
+    await shown('geminiWebFields') === true && await shown('openrouterFields') === false &&
+    await shown('geminiFields') === false && await shown('openaiFields') === false && await shown('deepseekFields') === false);
+  // There is no key for this service, so the button must not offer to test one — and the hint
+  // in the panel tells the person to press it by its label, so the two have to agree.
+  check('the button says it tests the login, not a key', await ev(`document.getElementById('test').textContent`) === 'Test login', await ev(`document.getElementById('test').textContent`));
+  check('the panel has no key or token box at all — there is nothing to paste',
+    await ev(`!!document.querySelector('#geminiWebFields input[type=password]')`) === false);
+  check('and it offers the one model every account has, by default',
+    await val('geminiWebModel') === '' && /default model/i.test(await ev(`document.querySelector('#geminiWebModel option').textContent`)));
+
+  await choose('openai');
+  check('leaving it puts the button back to testing a key', await ev(`document.getElementById('test').textContent`) === 'Test key', await ev(`document.getElementById('test').textContent`));
+
+  await open({ provider: 'gemini-web' });
+  await msgReply({ error: 'No signed-in gemini.google.com tab is open. Open one and leave it open.' });
+  await click('test');
+  check('Test login with no signed-in tab open repeats what to open, and sends no model list request',
+    /No signed-in gemini\.google\.com tab/.test(await status()) && (await fetches()).length === 0 && (await messages()).some(m => m.type === 'gemini-web-test'), await status());
+  check('a failed login test is shown as a failure, not a pass', await ev(`document.getElementById('status').className`) === 'bad');
+
+  await open({ provider: 'gemini-web', geminiWebModels: [
+    { id: 'a', name: 'gemini-flash', label: 'Flash', description: 'Fast', number: 1 },
+  ] });
+  await msgReply({ note: 'Signed in and ready · 1 model available to this account are in the list' });
+  await click('test');
+  check('a good login test is a green tick that says what it found',
+    /^✓ /.test(await status()) && /1 model/.test(await status()) && await ev(`document.getElementById('status').className`) === 'ok', await status());
+  check('it asks the service worker, and carries no key, token or password of any kind',
+    (await messages()).some(m => m.type === 'gemini-web-test' && m.keys.length === 1) &&
+    (await messages()).every(m => !m.keys.includes('token') && !m.keys.includes('key') && !m.keys.includes('body')), JSON.stringify(await messages()));
+
+  // The button that opens the site is the only way in — the login already lives in that browser,
+  // so this is where a new user is sent first.
+  await ev(`document.getElementById('openGemini').click(); 'ok'`);
+  await sleep(50);
+  check('Open gemini.google.com opens the site\'s chat page in a new tab',
+    (await messages()).some(m => m.tab === 'https://gemini.google.com/app'), JSON.stringify(await messages()));
+
+  // A saved model list becomes the two drop-downs, so a model can be picked without asking again.
+  await open({ provider: 'gemini-web', geminiWebModels: [
+    { id: 'a', name: 'gemini-flash', label: 'Flash', description: 'Fast', number: 1 },
+    { id: 'b', name: 'gemini-pro', label: 'Pro', description: 'Smarter', number: 3 },
+  ] });
+  const gOpts = await ev(`JSON.stringify([...document.getElementById('geminiWebModel').options].map(o => o.value))`).then(JSON.parse);
+  check('a saved model list fills the drop-down, keeping the account default first',
+    JSON.stringify(gOpts) === JSON.stringify(['', 'gemini-flash', 'gemini-pro']), JSON.stringify(gOpts));
+  check('each entry says what the model is for',
+    /Flash — Fast/.test(await ev(`document.querySelector('#geminiWebModel option[value="gemini-flash"]').textContent`)));
+  check('the fallback drop-down offers the same models, with None first',
+    JSON.stringify(await ev(`JSON.stringify([...document.getElementById('geminiWebFallbackModel').options].map(o => o.value))`).then(JSON.parse)) === JSON.stringify(['', 'gemini-flash', 'gemini-pro']));
+
+  // A model saved before, which this account's list no longer offers, must not be silently
+  // swapped: that would change the answers without saying so.
+  await open({ provider: 'gemini-web', geminiWebModel: 'gemini-pro', geminiWebModels: [
+    { id: 'a', name: 'gemini-flash', label: 'Flash', description: 'Fast', number: 1 },
+  ] });
+  check('a saved model the list no longer offers is kept, and marked as such',
+    await val('geminiWebModel') === 'gemini-pro' && /not offered by this account/.test(await ev(`document.querySelector('#geminiWebModel option[value="gemini-pro"]').textContent`)), await val('geminiWebModel'));
+
+  await open({ provider: 'gemini-web', geminiWebModel: 'gemini-pro', geminiWebFallbackModel: 'gemini-flash', geminiWebThinking: 'medium' });
+  await click('save');
+  st = await ev(`JSON.stringify(window.__store)`).then(JSON.parse);
+  check('saving keeps the service, both models and the thinking level',
+    st.provider === 'gemini-web' && st.geminiWebModel === 'gemini-pro' && st.geminiWebFallbackModel === 'gemini-flash' && st.geminiWebThinking === 'medium', JSON.stringify({ p: st.provider, m: st.geminiWebModel, f: st.geminiWebFallbackModel, t: st.geminiWebThinking }));
+  check('and stores no key or token for it, because there is none', !('geminiWebToken' in st) && !('geminiWebKey' in st));
+
+  // The site has four levels, not two, and Medium is not the one above Low.
+  check('the thinking box offers all four of the site\'s levels, standard first',
+    JSON.stringify(await ev(`JSON.stringify([...document.getElementById('geminiWebThinking').options].map(o => o.value))`).then(JSON.parse)) === JSON.stringify(['', 'low', 'medium', 'high']));
+
+  await open({ provider: 'gemini-web' });
+  check('and standard is what a new install is on', await val('geminiWebThinking') === '', await val('geminiWebThinking'));
+
+  // 0.6.30 and earlier saved this as a plain on/off switch; an old `true` was the site's
+  // extended thinking, so it must come back as "high" rather than silently dropping to standard.
+  await open({ provider: 'gemini-web', geminiWebThinking: true });
+  check('an on/off switch saved by an older version opens as the level it meant',
+    await val('geminiWebThinking') === 'high', await val('geminiWebThinking'));
+
+  await open({ provider: 'gemini-web', geminiWebThinking: 'nonsense' });
+  check('a level that is not one of the site\'s falls back to standard rather than being sent',
+    await val('geminiWebThinking') === '', await val('geminiWebThinking'));
 
   s.close();
   console.log(`\n${fail === 0 ? '✓ all' : '✗'} ${pass} passed, ${fail} failed\n`);

@@ -46,7 +46,7 @@ Same idea as DeepSeek — your own account, no key to buy — but it works diffe
 
 **Leave a signed-in `gemini.google.com` tab open while the tool answers.** The extension sends its questions from inside that tab, because that is the only place your Google login is valid. It does not copy your cookies or store a password. In Options, press **Test login** and it will tell you whether it found the tab, then fill the model box with the models your account can actually use.
 
-The good news compared with DeepSeek: **it reads pictures**, so diagram questions work, and there is no anti-bot puzzle slowing every question down. Leave the model box on the default unless you have a reason not to — the default is the one model every account has, and some of the others only work on a paid account. The account's allowance is shared, so a long lesson run can use it up; the status line says so if that happens.
+The good news compared with DeepSeek: **it reads pictures**, so diagram questions work, and there is no anti-bot puzzle slowing every question down. Leave the model box on the default unless you have a reason not to — the default is the one model every account has, and some of the others only work on a paid account. **Thinking** (Standard, Low, Medium, Extended) controls how long it reasons before answering: higher is slower and uses the account's allowance faster, so leave it on Standard unless a question needs the extra room. The account's allowance is shared, so a long lesson run can use it up; the status line says so if that happens.
 
 
 ## 3. Answer something
@@ -76,6 +76,7 @@ Watch the status line at the top right of the lesson page; it says what it is do
 - **"Could not see the picture"**: the model cannot read images. Pick one that can in Options.
 - **"Could not solve the proof-of-work"** on DeepSeek: the site changed its puzzle. Nothing on your side will fix it; use another service and it can be looked at.
 - **"No signed-in gemini.google.com tab is open"** on the Gemini login option: open that site in a tab, sign in, and leave the tab open. If it is already open, reload it — the extension can only use a tab it has loaded its script into.
+- **"the model list did not arrive"** on the Gemini login option: the tab is signed in but the reply was not one the extension could read. The message then describes what did arrive — how many frames came back, which rpc ids they carried and how long the largest part was — which is what tells a changed payload apart from a reply that belongs to a different account. If several Google accounts are signed in on this browser, the extension asks at the tab's own `/u/<n>/` slot, so the open tab must be the account you mean to use; if the message names a slot, that is the login to check. Press **Test login** again after reloading the tab and the extension.
 - **An empty reply that ran out of room**: the model thinks too long to answer. Try a different one.
 - **Nothing changes after an update**: reload the extension, then F5 the tab, and check the version in the popup.
 
