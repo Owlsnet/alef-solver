@@ -70,6 +70,7 @@
     <option value="openrouter">OpenRouter (one key, many models)</option>
     <option value="gemini">Google Gemini (your own Google key)</option>
     <option value="openai">OpenAI, the ChatGPT models (your own OpenAI key)</option>
+    <option value="deepseek">DeepSeek — your own chat.deepseek.com login</option>
   </select>
   <div class="hint">Only the one chosen here is used. Each keeps its own key and model below.</div>
 
@@ -133,6 +134,26 @@
   <label for="openaiFallbackModel">Fallback model (optional)</label>
   <input id="openaiFallbackModel" list="openaiModels" placeholder="tried if the first one fails" spellcheck="false">
   <div class="hint">If a model is rate-limited or unavailable, the tool tries this one. A wrong key stops at once, since another model would be refused too.</div>
+  </div>
+
+  <div id="deepseekFields" hidden>
+  <label for="deepseekToken">DeepSeek login token</label>
+  <input id="deepseekToken" type="password" placeholder="paste it, or use the button below" autocomplete="off" spellcheck="false">
+  <div class="hint">Not an API key: this is your own chat.deepseek.com login. Sign in on that site in another tab, then press “Copy token from the site” — it reads the <code>userToken</code> out of that tab and puts it here. It is stored in this browser only, sent to chat.deepseek.com and nowhere else, and stops working when you sign out of the site.</div>
+  <div class="keyrow"><button class="ghost small" id="grabToken" type="button">Copy token from the site</button></div>
+
+  <label for="deepseekModel">DeepSeek model</label>
+  <select id="deepseekModel">
+    <option value="deepseek-chat">deepseek-chat — Instant, fast</option>
+    <option value="deepseek-expert">deepseek-expert — stronger, slower</option>
+  </select>
+  <div class="hint">Instant and Expert are the two the site offers. DeepThink is a switch, below, not a model.</div>
+
+  <label class="check" for="deepseekThinking"><input id="deepseekThinking" type="checkbox"> DeepThink (let it reason before answering)</label>
+  <div class="hint">Slower and better on hard questions, and it burns more of your account's allowance. It also takes longer, so leave it off unless the questions are hard.</div>
+
+  <label class="check" for="deepseekSearch"><input id="deepseekSearch" type="checkbox"> Web search</label>
+  <div class="hint">Lets it search the web before answering. Rarely useful for coursework questions.</div>
   </div>
 
   <label for="answerDelay">Delay after clicking an answer (ms)</label>

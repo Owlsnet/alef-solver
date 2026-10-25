@@ -1,11 +1,12 @@
 const FIELDS = ['provider', 'apiKey', 'model', 'fallbackModel', 'geminiKey', 'geminiModel', 'geminiFallbackModel',
                 'openaiKey', 'openaiModel', 'openaiFallbackModel',
+                'deepseekToken', 'deepseekModel', 'deepseekThinking', 'deepseekSearch',
                 'answerDelay', 'stepDelay', 'retries', 'devMode', 'hotkeys', 'maxLessons'];
 const GEMINI_API = 'https://generativelanguage.googleapis.com/v1beta';
 const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
 const OPENAI_API = 'https://api.openai.com/v1';
 const DEFAULT_OPENAI_MODEL = 'gpt-5-mini';
-const SERVICES = ['openrouter', 'gemini', 'openai'];
+const SERVICES = ['openrouter', 'gemini', 'openai', 'deepseek'];
 
 /* ------------------------------------------------------------- shortcuts */
 
@@ -132,6 +133,10 @@ async function load() {
   document.getElementById('openaiKey').value = s.openaiKey || '';
   document.getElementById('openaiModel').value = s.openaiModel || DEFAULT_OPENAI_MODEL;
   document.getElementById('openaiFallbackModel').value = s.openaiFallbackModel || '';
+  document.getElementById('deepseekToken').value = s.deepseekToken || '';
+  document.getElementById('deepseekModel').value = s.deepseekModel || 'deepseek-chat';
+  document.getElementById('deepseekThinking').checked = s.deepseekThinking === true;
+  document.getElementById('deepseekSearch').checked = s.deepseekSearch === true;
   showProvider();
   document.getElementById('answerDelay').value = s.answerDelay ?? 120;
   document.getElementById('stepDelay').value = s.stepDelay ?? 250;
@@ -146,6 +151,7 @@ function showProvider() {
   document.getElementById('openrouterFields').hidden = which !== 'openrouter';
   document.getElementById('geminiFields').hidden = which !== 'gemini';
   document.getElementById('openaiFields').hidden = which !== 'openai';
+  document.getElementById('deepseekFields').hidden = which !== 'deepseek';
 }
 document.getElementById('provider').addEventListener('change', () => { showProvider(); status('Press Save to switch.'); });
 
@@ -171,6 +177,10 @@ function read() {
     openaiKey: document.getElementById('openaiKey').value.trim(),
     openaiModel: document.getElementById('openaiModel').value.trim() || DEFAULT_OPENAI_MODEL,
     openaiFallbackModel: document.getElementById('openaiFallbackModel').value.trim(),
+    deepseekToken: document.getElementById('deepseekToken').value.trim(),
+    deepseekModel: document.getElementById('deepseekModel').value || 'deepseek-chat',
+    deepseekThinking: document.getElementById('deepseekThinking').checked,
+    deepseekSearch: document.getElementById('deepseekSearch').checked,
     answerDelay: num('answerDelay', 3000),
     stepDelay: num('stepDelay', 5000),
     retries: num('retries', 10),
@@ -294,9 +304,68 @@ async function testOpenAI() {
   }
 }
 
+/* ------------------------------------------------------------- DeepSeek */
+
+/** Read the login token out of the person's own chat.deepseek.com tab. The token sits in that
+ *  page's localStorage, which this extension cannot read across origins — so the page itself is
+ *  asked for it, in its own context, and only that one value comes back. Nothing else is taken.
+ *  Runs only on a click, and only in a tab that is already on that site. */
+async function grabDeepseekToken() {
+  status('Looking for a signed-in chat.deepseek.com tab…');
+  try {
+    const [tab] = await chrome.tabs.query({ url: 'https://chat.deepseek.com/*' });
+    if (!tab?.id) {
+      status('No chat.deepseek.com tab is open. Open the site, sign in, then try again.', 'bad');
+      return;
+    }
+    const [{ result } = {}] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',                       // the page's own storage lives here, not in the isolated world
+      func: () => {
+        try {
+          const raw = localStorage.getItem('userToken');
+          if (!raw) return { error: 'not signed in' };
+          // It is normally JSON: {"value":"<token>"...}. A bare string is taken as-is.
+          const v = raw.trim().startsWith('{') ? JSON.parse(raw).value : raw;
+          return v ? { token: String(v) } : { error: 'empty token' };
+        } catch (e) { return { error: String(e) }; }
+      },
+    });
+    if (result?.token) {
+      document.getElementById('deepseekToken').value = result.token;
+      status(`Got the token from “${tab.title || 'the DeepSeek tab'}”. Press Save to keep it.`, 'ok');
+    } else {
+      status(`Could not read a token from that tab (${result?.error || 'not found'}). Sign in on chat.deepseek.com first.`, 'bad');
+    }
+  } catch (e) {
+    status(`✗ ${e.message || e}`, 'bad');
+  }
+}
+document.getElementById('grabToken').addEventListener('click', grabDeepseekToken);
+
+/** Check the token by doing what the tool does: ask for a challenge and solve it. That proves
+ *  the token works and that the proof-of-work is being answered correctly — the two things that
+ *  actually go wrong. The solving itself lives in the service worker, so the crypto is in one
+ *  place; nothing is sent to the model, so this costs no allowance. */
+async function testDeepseek() {
+  const { deepseekToken } = read();
+  if (!deepseekToken) { status('Get a token first, with the button above.', 'bad'); return; }
+  status('Testing the token and the proof-of-work…');
+  try {
+    const r = await chrome.runtime.sendMessage({ type: 'deepseek-test', token: deepseekToken });
+    if (!r) { status('The extension\'s service worker did not answer — reload the extension and try again.', 'bad'); return; }
+    if (r.ok) status(`✓ ${r.note}`, 'ok');
+    else status(r.error || 'the test failed', 'bad');
+  } catch (e) {
+    status(`✗ ${e.message || e}`, 'bad');
+  }
+}
+
 document.getElementById('test').addEventListener('click', async () => {
-  if (document.getElementById('provider').value === 'gemini') { await testGemini(); return; }
-  if (document.getElementById('provider').value === 'openai') { await testOpenAI(); return; }
+  const which = document.getElementById('provider').value;
+  if (which === 'gemini') { await testGemini(); return; }
+  if (which === 'openai') { await testOpenAI(); return; }
+  if (which === 'deepseek') { await testDeepseek(); return; }
   const { apiKey, model } = read();
   if (!apiKey) { status('Paste a key first.', 'bad'); return; }
   status('Testing…');

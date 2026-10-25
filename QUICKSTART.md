@@ -19,6 +19,7 @@ Click the extension's icon, then **Options…**. Under **Which service answers t
 | OpenRouter | [openrouter.ai/keys](https://openrouter.ai/keys): one key, many models | `deepseek/deepseek-v4.1-flash` |
 | Google Gemini | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | `gemini-2.5-flash` |
 | OpenAI (ChatGPT models) | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | `gpt-5-mini` |
+| DeepSeek | your own chat.deepseek.com login — no key to buy | `deepseek-chat` |
 
 Paste the key, press **Test key** (you want a green ✓ and the model's one-word reply), then **Save**.
 
@@ -27,6 +28,17 @@ Paste the key, press **Test key** (you want a green ✓ and the model's one-word
 - Graph and picture questions need a model that can read images. If a model cannot, the status line says so and the answer is a guess.
 
 You pay the service you choose, so check its pricing page. The key stays in this browser and is sent to nothing but its own service.
+
+### The DeepSeek option
+
+It uses your own free account on the site instead of a key you buy. Sign in at `chat.deepseek.com` in a tab, then in Options press **Copy token from the site** — it reads your login out of that tab and puts it in the box. Press **Test key**: a green ✓ there means the login is live and the site's anti-bot puzzle was solved. Then **Save**.
+
+Two things to know before you use it:
+
+- **A lesson run is slower on it.** Every question costs about a second of puzzle-solving first, and the two models are `deepseek-chat` (fast) and `deepseek-expert` (slower). DeepThink makes it slower again.
+- **It is your own account being used.** The site sees one person answering a lot of questions quickly, which is not what the site is for, and it may not like it. That risk is yours to weigh, and the same login stops working if you sign out on the site.
+- **Pictures are not read.** Diagram questions are answered from the text alone, and the status line says when that happened, so pick another service if your work is full of graphs.
+
 
 ## 3. Answer something
 
@@ -51,8 +63,9 @@ If an answer is marked wrong and the page offers Try Again, it tries again with 
 Watch the status line at the top right of the lesson page; it says what it is doing and why it stopped.
 
 - **"No API key set"** in the popup: finish step 2.
-- **A refused key** (HTTP 401, or "check the key in Options"): the key is wrong or not allowed to use that model.
+- **A refused key** (HTTP 401, or "check the key in Options"): the key is wrong or not allowed to use that model. On DeepSeek it means the login has expired — sign in on the site again and press **Copy token from the site**.
 - **"Could not see the picture"**: the model cannot read images. Pick one that can in Options.
+- **"Could not solve the proof-of-work"** on DeepSeek: the site changed its puzzle. Nothing on your side will fix it; use another service and it can be looked at.
 - **An empty reply that ran out of room**: the model thinks too long to answer. Try a different one.
 - **Nothing changes after an update**: reload the extension, then F5 the tab, and check the version in the popup.
 

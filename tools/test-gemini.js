@@ -18,9 +18,10 @@ let store = {};
 const ctx = vm.createContext({
   console,
   fetch: (...a) => fetchImpl(...a),
+  btoa: s => Buffer.from(s, 'binary').toString('base64'),   // a service worker has this; the sandbox must too
   chrome: {
     runtime: { onMessage: { addListener() { } } },
-    storage: { local: { get: async () => ({ ...store }) } },
+    storage: { local: { get: async () => ({ ...store }), set: async o => { Object.assign(store, o); } } },
   },
 });
 vm.runInContext(SRC, ctx, { filename: 'background.js' });
@@ -31,6 +32,7 @@ const check = (name, ok, detail = '') => {
   ok ? pass++ : fail++;
 };
 const j = v => JSON.stringify(v);           // results come out of another realm: compare by value
+const toHex = bytes => [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
 
 const KEY = 'AIzaSy-SECRET-TEST-KEY-0123456789';
 const DATA = 'data:image/jpeg;base64,AAAA';
@@ -433,6 +435,125 @@ const useGemini = (extra = {}) => { store = { provider: 'gemini', geminiKey: KEY
   calls = script(gem('', { content: { role: 'model' }, finishReason: 'MAX_TOKENS' }), gem('{"answer":"B","index":1}'));
   res = await ctx.ask(mcq());
   check('Gemini: more room as before, and no setting of another service in the request', res.index === 1 && calls[1].body.generationConfig.maxOutputTokens === 4000 && !/reasoning/.test(calls[1].raw));
+
+  /* ---------------------------------------------------------------- DeepSeek */
+  console.log('\nDeepSeek, the account\'s own chat login');
+  const DKEY = 'ds-token-FAKE-0123456789';
+  const useDeepSeek = (extra = {}) => { store = { provider: 'deepseek', deepseekToken: DKEY, ...extra }; };
+  // The challenge the site hands out, with an answer the solver can actually find.
+  const SALT = 'testsalt', EXPIRE = 1700000000, NONCE = 4242;
+  const round1 = toHex(ctx.deepseekHash(ctx.utf8(`${SALT}_${EXPIRE}_${NONCE}`), 1));
+  const challenge = { algorithm: 'DeepSeekHashV1', challenge: round1, salt: SALT, expire_at: EXPIRE, difficulty: 10000, signature: 'sig', target_path: '/api/v0/chat/completion' };
+  const biz = data => ({ ok: true, status: 200, text: async () => '', json: async () => ({ code: 0, msg: '', data: { biz_data: data } }) });
+  const sse = (text, extra = {}) => ({
+    ok: true, status: 200, json: async () => ({}),
+    text: async () => [`data: ${JSON.stringify({ v: { response: { message_id: 777, fragments: [{ type: 'RESPONSE', content: text }] } } })}`, 'data: {"v":"[DONE]"}'].join('\n') + (extra.tail || ''),
+  });
+  const isChallenge = c => /create_pow_challenge$/.test(c.url);
+  const isCompletion = c => /\/chat\/completion$/.test(c.url);
+  // Every DeepSeek call in order: the thread, the challenge, then the completion.
+  const dsScript = completionText => script(
+    biz({ chat_session: { id: 'sess-1' } }),
+    biz({ challenge }),
+    sse(completionText),
+  );
+
+  useDeepSeek();
+  calls = dsScript('{"answer":"B","index":1,"confidence":0.8,"why":"stated"}');
+  res = await ctx.ask(mcq());
+  check('the answer comes back, read out of the site\'s own stream', res.index === 1 && res.letter === 'B' && !res.error, j(res));
+  check('three calls: a thread, a challenge, then the completion', calls.length === 3 && /chat_session\/create$/.test(calls[0].url) && isChallenge(calls[1]) && isCompletion(calls[2]), calls.map(c => c.url.split('/api/v0')[1]).join(' → '));
+  check('the token is a Bearer login, and never in an address or a body', calls.every(c => c.headers.authorization === 'Bearer ' + DKEY) && calls.every(c => !c.url.includes(DKEY) && !c.raw.includes(DKEY)));
+  check('no other service\'s headers ride along', calls.every(c => !('x-goog-api-key' in c.headers) && !('HTTP-Referer' in c.headers)));
+  check('it says which service it pretends to be', calls[0].headers['x-client-platform'] === 'web' && calls[0].headers['x-client-bundle-id'] === 'com.deepseek.chat' && !!calls[0].headers['x-client-version']);
+  check('the token does not come back in the result', !j(res).includes(DKEY));
+
+  check('the thread is created before it is used, and named in the completion', calls[2].body.chat_session_id === 'sess-1');
+  check('the completion asks for the model the site knows', calls[2].body.model_type === 'default', calls[2].body.model_type);
+  check('the proof-of-work answer is in its own header, base64 of JSON', (() => {
+    const h = calls[2].headers['x-ds-pow-response'];
+    if (!h) return false;
+    const d = JSON.parse(Buffer.from(h, 'base64').toString('utf8'));
+    return d.answer === NONCE && d.challenge === round1 && d.salt === SALT && d.signature === 'sig' && d.target_path === '/api/v0/chat/completion';
+  })(), calls[2].headers['x-ds-pow-response']);
+  check('the challenge was asked for with the path it is for', isChallenge(calls[1]) && calls[1].body.target_path === '/api/v0/chat/completion');
+  check('the question is sent as the site\'s own prompt field', /Which is right\?/.test(calls[2].body.prompt) && calls[2].body.ref_file_ids.length === 0, JSON.stringify(Object.keys(calls[2].body)));
+  check('the system instructions ride along in the prompt', /multiple-choice exam/.test(calls[2].body.prompt));
+  check('thinking and search are off unless asked for', calls[2].body.thinking_enabled === false && calls[2].body.search_enabled === false);
+
+  useDeepSeek({ deepseekThinking: true, deepseekSearch: true });
+  calls = dsScript('{"answer":"A","index":0}');
+  res = await ctx.ask(mcq());
+  check('DeepThink and web search are switches on the request, not separate models', res.index === 0 && calls[2].body.thinking_enabled === true && calls[2].body.search_enabled === true);
+
+  useDeepSeek({ deepseekModel: 'deepseek-expert' });
+  calls = dsScript('{"answer":"A","index":0}');
+  await ctx.ask(mcq());
+  check('the stronger model is asked for as "expert"', calls[2].body.model_type === 'expert', calls[2].body.model_type);
+
+  console.log('\nDeepSeek: every kind of question is read from its stream');
+  useDeepSeek();
+  calls = dsScript('{"blanks":["increased","decreased"]}');
+  res = await ctx.ask({ kind: 'cloze', images: [], cloze: { text: 'a [BLANK 1] b [BLANK 2]', wordBank: [], blanks: [{}, {}] } });
+  check('fill in the blank', j(res.words) === '["increased","decreased"]', j(res));
+  calls = dsScript('{"picks":[2,0]}');
+  res = await ctx.ask({ kind: 'dropdown', images: [], dropdown: { text: 'x', menus: [['a', 'b', 'c'], ['d', 'e']] } });
+  check('drop-downs', j(res.picks) === '[2,0]', j(res));
+  calls = dsScript('{"pairs":[1,0]}');
+  res = await ctx.ask({ kind: 'match', images: [], match: { intro: 'm', left: ['l1', 'l2'], right: ['r1', 'r2'] } });
+  check('matching', j(res.pairs) === '[1,0]', j(res));
+  calls = dsScript('{"order":[1,0,2]}');
+  res = await ctx.ask({ kind: 'sort', images: [], sort: { intro: 's', items: ['a', 'b', 'c'] } });
+  check('ordering', j(res.pairs) === '[1,0,2]', j(res));
+  calls = dsScript('{"answers":["A","C"],"indices":[0,2]}');
+  res = await ctx.ask(mcq({ multi: true, instruction: 'Select the correct answers.' }));
+  check('select all that apply', j(res.indices) === '[0,2]', j(res));
+  check('and that question was sent with the tick-all instructions', /MORE THAN ONE/.test(calls[2].body.prompt));
+
+  console.log('\nDeepSeek: pictures, and the things that go wrong');
+  useDeepSeek();
+  calls = dsScript('{"answer":"A","index":0}');
+  res = await ctx.ask(mcq({ image: DATA, images: [DATA2], imageCount: 2 }));
+  check('the chat takes no pictures, so the question goes without them and is marked blind', res.index === 0 && res.imageDropped === true && calls.length === 3, j(res));
+  check('nothing image-shaped is in the prompt', !/base64/.test(calls[2].raw));
+  check('and the prompt admits the figure could not be attached', /could NOT be attached/.test(calls[2].body.prompt));
+
+  calls = dsScript('not an answer at all, just prose');
+  res = await ctx.ask(mcq());
+  check('a reply with no answer in it fails, and says what it said', !!res.error && /unparseable reply/.test(res.error) && /just prose/.test(res.error), (res.error || '').slice(0, 120));
+  check('and the question was not asked twice for a flag this endpoint has no setting for', calls.length === 3, `calls=${calls.length}`);
+
+  calls = script(biz({ chat_session: { id: 'sess-1' } }), { ok: false, status: 401, text: async () => '{"code":401,"msg":"unauthorized"}', json: async () => ({}) });
+  res = await ctx.ask(mcq());
+  check('a refused token stops at once, without asking for a challenge', calls.length === 2, `calls=${calls.length}`);
+  check('and says how to fix it', /DeepSeek refused the token/.test(res.error || '') && /Copy token from the site/.test(res.error || ''), res.error);
+  check('without repeating the token', !(res.error || '').includes(DKEY));
+
+  calls = script(biz({ chat_session: { id: 's' } }), biz({ challenge }), { ok: false, status: 429, text: async () => '{"code":429,"msg":"too many"}', json: async () => ({}) });
+  res = await ctx.ask(mcq());
+  check('a rate limit stops rather than trying a second model the account would also be refused', calls.length === 3 && /rate-limiting this account/.test(res.error || ''), res.error);
+
+  calls = script(biz({ chat_session: { id: 's' } }), biz({ challenge: { ...challenge, difficulty: 5, challenge: 'ff'.repeat(32) } }));
+  res = await ctx.ask(mcq());
+  check('a challenge the tool cannot answer is said plainly, not passed off as a wrong answer', !!res.error && /proof-of-work/.test(res.error), (res.error || '').slice(0, 140));
+
+  // The digest variant: sources disagree on whether DeepSeek drops Keccak round 0. Whichever
+  // one a challenge was made with, the solver must find it — that is the whole point of trying both.
+  const standard = toHex(ctx.deepseekHash(ctx.utf8(`${SALT}_${EXPIRE}_${NONCE}`), 0));
+  calls = script(biz({ chat_session: { id: 's' } }), biz({ challenge: { ...challenge, challenge: standard } }), sse('{"answer":"B","index":1}'));
+  res = await ctx.ask(mcq());
+  check('a challenge made with the standard digest is still answered (both variants are tried)', res.index === 1 && !res.error, j(res));
+
+  store = { provider: 'deepseek' };
+  calls = script(biz({}));
+  res = await ctx.ask(mcq());
+  check('no token set: the old no-credential message, naming the right service', /DeepSeek token/.test(res.error || '') && calls.length === 0, res.error);
+
+  console.log('\nOpenRouter and the others are unchanged by any of this');
+  store = { apiKey: 'sk-or-v1-abc' };
+  calls = script(orGood('{"answer":"B","index":1}'));
+  res = await ctx.ask(mcq());
+  check('with nothing chosen it is still OpenRouter, with no DeepSeek call', res.index === 1 && calls.length === 1 && calls[0].url === 'https://openrouter.ai/api/v1/chat/completions', calls[0].url);
 
   console.log('\na question whose page text holds no question');
   const bareQ = ctx.buildText(multiQ({ stem: 'Select the correct answers.' }));

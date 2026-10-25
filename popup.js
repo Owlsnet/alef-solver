@@ -1,4 +1,4 @@
-const KEYS = ['autoSubmit', 'openPassage', 'screenshot', 'apiKey', 'provider', 'geminiKey', 'openaiKey', 'advance', 'cachePassage', 'devMode', 'hotkeys', 'autoNextLesson', 'skipLater'];
+const KEYS = ['autoSubmit', 'openPassage', 'screenshot', 'apiKey', 'provider', 'geminiKey', 'openaiKey', 'deepseekToken', 'advance', 'cachePassage', 'devMode', 'hotkeys', 'autoNextLesson', 'skipLater'];
 
 // Developer mode (set in Options) shows Dump and Copy last report. Reports are saved
 // either way; the switch only decides whether there is a button to copy one.
@@ -33,8 +33,15 @@ async function load() {
   document.getElementById('cachePassage').checked = s.cachePassage !== false;
   document.getElementById('autoNextLesson').checked = s.autoNextLesson === true;     // off until switched on
   document.getElementById('skipLater').checked = s.skipLater !== false;              // on unless switched off
-  // The warning is about the key of the service that is chosen: a Gemini key does nothing for OpenRouter.
-  document.getElementById('warn').classList.toggle('on', !(s.provider === 'gemini' ? s.geminiKey : s.provider === 'openai' ? s.openaiKey : s.apiKey));
+  // The warning is about the credential of the service that is chosen: a Gemini key does nothing for OpenRouter.
+  const cred = s.provider === 'gemini' ? s.geminiKey
+             : s.provider === 'openai' ? s.openaiKey
+             : s.provider === 'deepseek' ? s.deepseekToken
+             : s.apiKey;
+  document.getElementById('warn').classList.toggle('on', !cred);
+  document.getElementById('warn').textContent = s.provider === 'deepseek'
+    ? 'No DeepSeek token set. Open Options and copy one from the site.'
+    : 'No API key set. Open Options and paste your key.';
   document.getElementById('ver').textContent = ` · v${BUILD}`;
   dev = s.devMode === true;
   document.getElementById('dump').hidden = !dev;

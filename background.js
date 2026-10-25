@@ -18,6 +18,12 @@ const DEFAULTS = {
   openaiKey: '',                   // an API key from platform.openai.com (not a ChatGPT login); used only when provider is 'openai'
   openaiModel: 'gpt-5-mini',
   openaiFallbackModel: '',
+  deepseekToken: '',               // the DeepSeek chat page's own login token, copied out of the page; used only when provider is 'deepseek'
+  deepseekModel: 'deepseek-chat',
+  deepseekFallbackModel: '',
+  deepseekThinking: false,         // DeepThink
+  deepseekSearch: false,           // the site's own web search
+  deepseekPowRound: null,          // which proof-of-work digest last answered: 1 (round 0 dropped) or 0
   autoSubmit: true,
   openPassage: true,
   screenshot: 'auto', // 'auto' | 'always' | 'never'
@@ -372,6 +378,368 @@ function fromGemini(json) {
 const MAX_TOKENS = 1500;
 const RETRY_TOKENS = 4000;
 
+/* ------------------------------------------------------- DeepSeek (the web chat)
+ *
+ * The chat at chat.deepseek.com has no public API for a signed-in account, so this asks the
+ * site the way the site's own page does: a session id, a proof-of-work challenge answered in
+ * the x-ds-pow-response header, then a streamed completion. The only thing the person supplies
+ * is their own login token (Options copies it out of an open tab); no key, no billing.
+ *
+ * Two things are easy to get wrong here and are worth stating plainly:
+ *
+ *  - The digest is NOT plain SHA3-256. DeepSeek's own wasm export `wasm_deepseek_hash_v1`
+ *    runs Keccak-f[1600] starting at round 1 (23 rounds, round 0 dropped). Sources disagree
+ *    about this — some say plain SHA3-256 — so POW_ROUND_START is tried both ways at runtime
+ *    and the one that answers a real challenge is remembered.
+ *  - The browser owns Origin and Referer, so a service-worker fetch cannot set them by hand.
+ *    declarativeNetRequest rewrites them (see rules.json); the WAF refuses requests without.
+ */
+
+const DS_BASE = 'https://chat.deepseek.com';
+const DS_COMPLETION = '/api/v0/chat/completion';
+const DS_CHALLENGE = '/api/v0/chat/create_pow_challenge';
+const DS_SESSION_CREATE = '/api/v0/chat_session/create';
+const DS_VERSION = '2.0.0';       // what the page calls itself; the site checks it
+
+// Keccak-f[1600] round constants, most significant half first as written in the spec.
+const RC_HEX = [
+  '0000000000000001', '0000000000008082', '800000000000808a', '8000000080008000',
+  '000000000000808b', '0000000080000001', '8000000080008081', '8000000000008009',
+  '000000000000008a', '0000000000000088', '0000000080008009', '000000008000000a',
+  '000000008000808b', '800000000000008b', '8000000000008089', '8000000000008003',
+  '8000000000008002', '8000000000000080', '000000000000800a', '800000008000000a',
+  '8000000080008081', '8000000000008080', '0000000080000001', '8000000080008008',
+];
+const RC_LO = Uint32Array.from(RC_HEX, h => parseInt(h.slice(8), 16));
+const RC_HI = Uint32Array.from(RC_HEX, h => parseInt(h.slice(0, 8), 16));
+
+// Rotation offsets, indexed by lane = x + 5y.
+const RHO = new Uint8Array([
+   0,  1, 62, 28, 27,
+  36, 44,  6, 55, 20,
+   3, 10, 43, 25, 39,
+  41, 45, 15, 21,  8,
+  18,  2, 61, 56, 14,
+]);
+
+const MASK32 = 0xffffffff;
+const DS_RATE = 136;              // SHA3-256 rate in bytes
+
+/** One Keccak-f[1600] permutation over 25 lanes held as lo/hi 32-bit halves.
+ *  `startRound` is 0 for standard Keccak, 1 for DeepSeek's variant. */
+function keccakF(lo, hi, startRound) {
+  const bl = new Uint32Array(25), bh = new Uint32Array(25);
+  const cl = new Uint32Array(5), ch = new Uint32Array(5);
+  const dl = new Uint32Array(5), dh = new Uint32Array(5);
+
+  for (let round = startRound; round < 24; round++) {
+    // theta
+    for (let x = 0; x < 5; x++) {
+      cl[x] = lo[x] ^ lo[x + 5] ^ lo[x + 10] ^ lo[x + 15] ^ lo[x + 20];
+      ch[x] = hi[x] ^ hi[x + 5] ^ hi[x + 10] ^ hi[x + 15] ^ hi[x + 20];
+    }
+    for (let x = 0; x < 5; x++) {
+      const p = (x + 4) % 5, q = (x + 1) % 5;      // rotl(c[q], 1) split across the halves
+      dl[x] = cl[p] ^ ((cl[q] << 1) | (ch[q] >>> 31));
+      dh[x] = ch[p] ^ (((ch[q] << 1) | (cl[q] >>> 31)) & MASK32);
+    }
+    for (let y = 0; y < 5; y++) {
+      for (let x = 0; x < 5; x++) {
+        const i = x + 5 * y;
+        lo[i] ^= dl[x];
+        hi[i] ^= dh[x];
+      }
+    }
+
+    // rho + pi: B[y, 2x+3y] = rotl(A[x, y], RHO[x, y])
+    for (let y = 0; y < 5; y++) {
+      for (let x = 0; x < 5; x++) {
+        const i = x + 5 * y;
+        const dest = y + 5 * ((2 * x + 3 * y) % 5);
+        let l = lo[i], h = hi[i], s = RHO[i], t;
+        // A 64-bit rotate, which JS cannot express directly: shifting by >= 32 would wrap
+        // (shift counts are taken modulo 32), so half-words are swapped first instead.
+        if (s >= 32) { t = l; l = h; h = t; s -= 32; }
+        if (s) {
+          const back = 32 - s;
+          t = (l << s) | (h >>> back);
+          h = ((h << s) | (l >>> back)) >>> 0;
+          l = t >>> 0;
+        }
+        bl[dest] = l;
+        bh[dest] = h;
+      }
+    }
+
+    // chi
+    for (let y = 0; y < 5; y++) {
+      for (let x = 0; x < 5; x++) {
+        const i = x + 5 * y, a = ((x + 1) % 5) + 5 * y, b = ((x + 2) % 5) + 5 * y;
+        lo[i] = bl[i] ^ ((~bl[a] & bl[b]) & MASK32);
+        hi[i] = bh[i] ^ ((~bh[a] & bh[b]) & MASK32);
+      }
+    }
+
+    // iota
+    lo[0] ^= RC_LO[round];
+    hi[0] ^= RC_HI[round];
+  }
+}
+
+/** XOR one rate-sized block into the state and permute. */
+function absorbBlock(lo, hi, block, startRound) {
+  for (let i = 0; i < DS_RATE; i += 4) {
+    const w = (block[i] | (block[i + 1] << 8) | (block[i + 2] << 16) | (block[i + 3] << 24)) >>> 0;
+    const lane = i >> 3;
+    if (i & 4) hi[lane] ^= w; else lo[lane] ^= w;
+  }
+  keccakF(lo, hi, startRound);
+}
+
+/** Keccak/SHA3-256 over `bytes` as a 32-byte digest. `startRound` 0 is plain SHA3-256;
+ *  1 is the DeepSeek variant (Keccak-f[1600] with round 0 dropped). */
+function deepseekHash(bytes, startRound = 1) {
+  const lo = new Uint32Array(25), hi = new Uint32Array(25);
+  const whole = (bytes.length / DS_RATE) | 0;
+
+  for (let b = 0; b < whole; b++) absorbBlock(lo, hi, bytes.subarray(b * DS_RATE, (b + 1) * DS_RATE), startRound);
+
+  // The tail is always padded out to a full block, even when the message ends on the boundary.
+  const rest = bytes.subarray(whole * DS_RATE);
+  const last = new Uint8Array(DS_RATE);
+  last.set(rest);
+  last[rest.length] = 0x06;          // SHA-3 domain separation
+  last[DS_RATE - 1] |= 0x80;         // pad10*1
+  absorbBlock(lo, hi, last, startRound);
+
+  const out = new Uint8Array(32);
+  for (let lane = 0; lane < 4; lane++) {
+    const l = lo[lane], h = hi[lane];
+    out[lane * 8 + 0] = l & 0xff;         out[lane * 8 + 1] = (l >>> 8) & 0xff;
+    out[lane * 8 + 2] = (l >>> 16) & 0xff; out[lane * 8 + 3] = (l >>> 24) & 0xff;
+    out[lane * 8 + 4] = h & 0xff;         out[lane * 8 + 5] = (h >>> 8) & 0xff;
+    out[lane * 8 + 6] = (h >>> 16) & 0xff; out[lane * 8 + 7] = (h >>> 24) & 0xff;
+  }
+  return out;
+}
+
+/** The bytes of a string as UTF-8. Written out rather than using TextEncoder so that this file
+ *  also runs in the bare test sandboxes, which do not provide it. */
+function utf8(text) {
+  const out = [];
+  const s = String(text);
+  for (let i = 0; i < s.length; i++) {
+    const c = s.codePointAt(i);
+    if (c > 0xffff) i++;                       // a surrogate pair is one code point
+    if (c < 0x80) out.push(c);
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+  }
+  return Uint8Array.from(out);
+}
+
+const toHex = bytes => [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
+
+/** Solve one proof-of-work challenge: find the nonce in [0, difficulty) whose digest of
+ *  `salt_expireAt_<nonce>` equals `challenge`. Returns the nonce, or null if there is none. */
+function solvePow(challenge, salt, expireAt, difficulty, startRound = 1) {
+  const target = String(challenge).toLowerCase();
+  const prefix = utf8(`${salt}_${expireAt}_`);
+  const block = new Uint8Array(DS_RATE);
+  const lo = new Uint32Array(25), hi = new Uint32Array(25);
+  const digest = new Uint8Array(32);
+  const limit = Math.max(0, Math.min(Number(difficulty) || 0, 2 ** 31 - 1));
+
+  for (let nonce = 0; nonce < limit; nonce++) {
+    // The message is always short enough to be one final block, so build it directly:
+    // prefix, then the decimal nonce, then the padding.
+    const d = String(nonce);
+    block.fill(0, prefix.length, DS_RATE);
+    block.set(prefix, 0);
+    for (let i = 0; i < d.length; i++) block[prefix.length + i] = d.charCodeAt(i);
+    block[prefix.length + d.length] = 0x06;
+    block[DS_RATE - 1] |= 0x80;
+
+    lo.fill(0);
+    hi.fill(0);
+    absorbBlock(lo, hi, block, startRound);
+    for (let lane = 0; lane < 4; lane++) {
+      const l = lo[lane], h = hi[lane];
+      digest[lane * 8 + 0] = l & 0xff;         digest[lane * 8 + 1] = (l >>> 8) & 0xff;
+      digest[lane * 8 + 2] = (l >>> 16) & 0xff; digest[lane * 8 + 3] = (l >>> 24) & 0xff;
+      digest[lane * 8 + 4] = h & 0xff;         digest[lane * 8 + 5] = (h >>> 8) & 0xff;
+      digest[lane * 8 + 6] = (h >>> 16) & 0xff; digest[lane * 8 + 7] = (h >>> 24) & 0xff;
+    }
+    if (toHex(digest) === target) return nonce;
+  }
+  return null;
+}
+
+/** The header the site wants: base64 of a compact JSON object, with the answer filled in. */
+function powHeader(challenge, answer) {
+  const payload = {
+    algorithm: challenge.algorithm || 'DeepSeekHashV1',
+    challenge: challenge.challenge,
+    salt: challenge.salt,
+    answer,
+    signature: challenge.signature,
+    target_path: challenge.target_path,
+  };
+  return btoa(JSON.stringify(payload));
+}
+
+/** Every header the site's own page sends. Origin and Referer are set by the browser and
+ *  cannot be written here — rules.json rewrites those two. */
+function dsHeaders(token, extra = {}) {
+  return {
+    authorization: `Bearer ${token}`,
+    accept: '*/*',
+    'content-type': 'application/json',
+    'x-app-version': DS_VERSION,
+    'x-client-version': DS_VERSION,
+    'x-client-platform': 'web',
+    'x-client-locale': 'en_US',
+    'x-client-bundle-id': 'com.deepseek.chat',
+    ...extra,
+  };
+}
+
+/** A business reply is `{code, msg, data:{biz_data}}`; code 0 is success. Anything else is
+ *  raised with the site's own message, which is far more useful than a bare HTTP status. */
+function dsBiz(json) {
+  if (!json || typeof json !== 'object') throw new Error('empty reply from DeepSeek');
+  if (json.code !== undefined && json.code !== 0) {
+    throw new Error(`DeepSeek said ${json.code}: ${json.msg || 'no message'}`);
+  }
+  const biz = json.data?.biz_data;
+  if (biz === undefined) throw new Error('DeepSeek reply had no business data');
+  return biz;
+}
+
+/** POST to the site. The response is handed back even when it is not ok, so the caller's
+ *  ordinary status handling sees it; only a transport failure throws. */
+async function dsCall(path, token, body, extraHeaders) {
+  return fetch(DS_BASE + path, {
+    method: 'POST',
+    headers: dsHeaders(token, extraHeaders),
+    body: JSON.stringify(body),
+    credentials: 'include',
+  });
+}
+
+/** A new thread. The site's own page does this before the first message. Only a refused token
+ *  is worth stopping for; anything else can be left to the completion call. */
+async function dsNewSession(token) {
+  const res = await dsCall(DS_SESSION_CREATE, token, {});
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) return { refused: res };
+    return { sessionId: null };
+  }
+  try {
+    return { sessionId: dsBiz(await res.json())?.chat_session?.id ?? null };
+  } catch {
+    return { sessionId: null };
+  }
+}
+
+/** Read the streamed completion and hand back the assistant's text, the message id, and why
+ *  it stopped. The site frames each line as `{v, p, o}`: `p` names a field, `o:"APPEND"`
+ *  means `v` is a piece of it. Thinking arrives on its own path and is dropped. */
+function parseDeepseekStream(raw) {
+  let text = '', path = '', messageId = null, finish = '';
+  for (const line of String(raw).split('\n')) {
+    const t = line.trim();
+    if (!t.startsWith('data:')) continue;
+    const payload = t.slice(5).trim();
+    if (payload === '[DONE]') { finish = finish || 'stop'; continue; }
+    if (!payload) continue;
+
+    let j;
+    try { j = JSON.parse(payload); } catch { continue; }
+    const frame = (j?.data && typeof j.data === 'object' && ('v' in j.data || 'p' in j.data)) ? j.data : j;
+    if (typeof frame?.finish_reason === 'string') finish = frame.finish_reason;
+    if (typeof frame?.p === 'string') path = frame.p;
+
+    const v = frame?.v;
+    // The end marker arrives bare (`data: [DONE]`) but is accepted framed too; either way it
+    // ends the message and must not be read as another piece of the answer.
+    if (v === '[DONE]' || frame === '[DONE]') { finish = finish || 'stop'; continue; }
+    if (v && typeof v === 'object' && v.response) {
+      for (const f of v.response.fragments || []) {
+        if (f?.type === 'RESPONSE' && f.content) { path = 'response/fragments/-1/content'; text += f.content; }
+      }
+      const id = v.response.message_id ?? v.message_id;
+      if (Number.isInteger(id)) messageId = id;
+    } else if (Number.isInteger(v) && /message_id$/.test(path)) {
+      messageId = v;
+    } else if (typeof v === 'string' && /content$/.test(path) && !/thinking/.test(path)) {
+      text += v;
+    }
+  }
+  return { text, messageId, finish };
+}
+
+/** One question, start to finish: challenge, solve, stream, assemble. Returns a reply shaped
+ *  like the other providers' so every retry and fallback rule above still applies. */
+async function deepseekComplete(cfg, body, model, thinkingOff) {
+  const token = String(cfg.deepseekToken || '').trim();
+  if (!token) throw new Error('No DeepSeek token set — open Options and copy one from the site.');
+
+  const modelType = /expert/i.test(model) ? 'expert' : 'default';
+  const user = body.messages[1];
+  // The site takes one text prompt and its own pictures; the system prompt rides along on top.
+  const prompt = [body.messages[0].content, '', ...user.content.filter(c => c.type === 'text').map(c => c.text)].join('\n');
+
+  const sessionId = await dsNewSession(token);
+  if (sessionId.refused) return sessionId.refused;
+
+  const challengeRes = await dsCall(DS_CHALLENGE, token, { target_path: DS_COMPLETION });
+  if (!challengeRes.ok) return challengeRes;
+  const challenge = dsBiz(await challengeRes.json()).challenge;
+  if (!challenge?.challenge) throw new Error('DeepSeek sent no proof-of-work challenge');
+
+  // Which digest variant answered last time, so the next question does not try both. A wrong
+  // guess costs one wasted search, so this is an optimisation only — never a correctness risk.
+  const round = cfg.deepseekPowRound === 0 || cfg.deepseekPowRound === 1 ? cfg.deepseekPowRound : 1;
+  let answer = solvePow(challenge.challenge, challenge.salt, challenge.expire_at, challenge.difficulty, round);
+  let usedRound = round;
+  if (answer === null) {
+    // The two variants are indistinguishable from the outside; whichever answers is the real one.
+    usedRound = round === 1 ? 0 : 1;
+    answer = solvePow(challenge.challenge, challenge.salt, challenge.expire_at, challenge.difficulty, usedRound);
+  }
+  if (answer === null) throw new Error(`could not solve the proof-of-work challenge (difficulty ${challenge.difficulty})`);
+  // Remember which digest answered, so the next question does not have to try both. Best effort:
+  // losing this only costs one extra attempt.
+  if (usedRound !== cfg.deepseekPowRound) {
+    try { await chrome.storage.local.set({ deepseekPowRound: usedRound }); } catch { /* ignore */ }
+  }
+
+  const res = await dsCall(DS_COMPLETION, token, {
+    chat_session_id: sessionId.sessionId,
+    parent_message_id: null,
+    prompt,
+    ref_file_ids: [],
+    thinking_enabled: !!(cfg.deepseekThinking && !thinkingOff),
+    search_enabled: !!cfg.deepseekSearch,
+    action: null,
+    preempt: false,
+    model_type: modelType,
+  }, { 'x-ds-pow-response': powHeader(challenge, answer) });
+
+  if (!res.ok) return res;                     // the caller's ordinary status handling takes it from here
+  const raw = await res.text();
+  const { text, finish } = parseDeepseekStream(raw);
+  // Hand it back in the shape the rest of this file already knows how to read.
+  return {
+    ok: true,
+    status: 200,
+    text: async () => raw,
+    json: async () => ({ choices: [{ message: { content: text }, finish_reason: finish || 'stop' }] }),
+  };
+}
+
 /* --------------------------------------------------------------- parsing */
 
 /** Parse a fill-in-the-blank reply: an array of words, one per blank. */
@@ -553,19 +921,26 @@ async function ask(payload) {
   const cfg = await settings();
   const gemini = cfg.provider === 'gemini';
   const openai = cfg.provider === 'openai';
-  if (gemini ? !cfg.geminiKey : openai ? !cfg.openaiKey : !cfg.apiKey) {
-    return { error: gemini ? 'No Gemini API key set — open the extension Options and paste one.'
-                  : openai ? 'No OpenAI API key set — open the extension Options and paste one.'
-                  : 'No API key set — open the extension Options and paste one.' };
+  const deepseek = cfg.provider === 'deepseek';
+  const missing = gemini ? 'No Gemini API key set — open the extension Options and paste one.'
+                : openai ? 'No OpenAI API key set — open the extension Options and paste one.'
+                : deepseek ? 'No DeepSeek token set — open Options and press “Copy token from the site”.'
+                : 'No API key set — open the extension Options and paste one.';
+  if (gemini ? !cfg.geminiKey : openai ? !cfg.openaiKey : deepseek ? !cfg.deepseekToken : !cfg.apiKey) {
+    return { error: missing };
   }
 
   // A model box saved empty means "the default", not "no model to ask".
   const chain = (gemini ? [cfg.geminiModel || DEFAULTS.geminiModel, cfg.geminiFallbackModel]
                : openai ? [cfg.openaiModel || DEFAULTS.openaiModel, cfg.openaiFallbackModel]
+               : deepseek ? [cfg.deepseekModel || DEFAULTS.deepseekModel, cfg.deepseekFallbackModel]
                : [cfg.model, cfg.fallbackModel]).filter(Boolean);
   const oa = {};                 // OpenAI only: what a model has turned out not to accept (see toOpenAI)
-  let body = buildBody(cfg, payload);
-  let imageDropped = false;
+  // DeepSeek's chat takes text only, so the picture is dropped here rather than failing a
+  // request with it. The question text then says the figure could not be attached.
+  const sent = deepseek ? { ...payload, image: null, images: [] } : payload;
+  let body = buildBody(cfg, sent);
+  let imageDropped = deepseek && !!(payload.image || payload.images?.length);
   const errors = [];
   const hasImages = b => b.messages[1].content.some(c => c.type === 'image_url');
   const blind = new Set();       // models that said they cannot read a picture
@@ -585,6 +960,7 @@ async function ask(payload) {
         body: JSON.stringify(toOpenAI(body, model, structured, { ...oa, lowEffort: !!thinking })),
       });
     }
+    if (deepseek) return deepseekComplete(cfg, body, model, thinking === 'off' || thinking === 'low');
     const reqBody = { ...body, model };
     if (structured) reqBody.response_format = { type: 'json_object' };
     // OpenRouter's own settings; a model with no thinking to adjust ignores them.
@@ -617,7 +993,7 @@ async function ask(payload) {
       messages: [b.messages[0], { ...user, content: user.content.map((c, i) => (i === 0 && c.type === 'text' ? { ...c, text: c.text + NUDGE } : c)) }],
     };
   };
-  const rebuilt = extra => { const b = buildBody(cfg, { ...payload, ...extra }); return tokensRaised ? forRetry(b) : b; };
+  const rebuilt = extra => { const b = buildBody(cfg, { ...sent, ...extra }); return tokensRaised ? forRetry(b) : b; };
 
   /** One round trip. Resolves { parsed } on success, or { error, then } where
    *  `then` says what the caller should do next: 'network' (give up on this
@@ -645,6 +1021,17 @@ async function ask(payload) {
       // OpenAI says a wrong key as a 401. Every model would be refused the same way: stop, and say what to check.
       if (openai && (res.status === 401 || /invalid_api_key|Incorrect API key/i.test(detail))) {
         return { error: `${model}: OpenAI refused the key (HTTP ${res.status}) — check it in Options. ${detail.slice(0, 160)}`, then: 'stop' };
+      }
+
+      // DeepSeek refuses a stale or wrong token the same way whatever the model: stop, and say
+      // how to fix it rather than burning the whole chain on it.
+      if (deepseek && (res.status === 401 || res.status === 403 || /invalid|expired|unauthor/i.test(detail))) {
+        return { error: `${model}: DeepSeek refused the token (HTTP ${res.status}) — open the site, sign in, and press “Copy token from the site” in Options. ${detail.slice(0, 120)}`, then: 'stop' };
+      }
+
+      // The site throttles by account, not by model: a second model would be refused too.
+      if (deepseek && res.status === 429) {
+        return { error: `${model}: DeepSeek is rate-limiting this account (HTTP 429) — wait a moment and try again. ${detail.slice(0, 120)}`, then: 'stop' };
       }
 
       // OpenRouter was told to switch thinking off and the model will not have it (some think whether asked
@@ -742,7 +1129,9 @@ async function ask(payload) {
   const runChain = async () => {
     for (const model of chain) {
       // Try structured output first, then plain — some models reject response_format.
-      for (const structured of [true, false]) {
+      // DeepSeek's own endpoint has no such setting, so it is asked exactly once: sending the
+      // same question twice for a flag it ignores only burns the account's rate limit.
+      for (const structured of deepseek ? [false] : [true, false]) {
         const r = await attempt(model, structured);
         if (r.parsed) return r.parsed;
         errors.push(r.error);
@@ -770,6 +1159,44 @@ async function ask(payload) {
   return { error: errors.join(' | ') || 'unknown failure' };
 }
 
+/** Options' "Test key": ask for a challenge and answer it, without asking the model anything. */
+async function deepseekSelfTest(token) {
+  if (!token) return { error: 'no token given' };
+  let res;
+  try {
+    res = await dsCall(DS_CHALLENGE, token, { target_path: DS_COMPLETION });
+  } catch (e) {
+    return { error: `could not reach chat.deepseek.com: ${e.message || e}` };
+  }
+  if (!res.ok) {
+    const d = (await res.text().catch(() => '')).slice(0, 160);
+    const hint = res.status === 401 || res.status === 403
+      ? ' The token has probably expired: sign in on the site again and re-copy it.' : '';
+    return { error: `DeepSeek refused it (HTTP ${res.status}).${hint} ${d}` };
+  }
+  let challenge;
+  try {
+    challenge = dsBiz(await res.json()).challenge;
+  } catch (e) {
+    return { error: `the reply was not a challenge (${e.message || e}) — the site has probably changed` };
+  }
+  if (!challenge?.challenge) return { error: 'the token works, but no challenge came back — the site has probably changed' };
+
+  const t0 = Date.now();
+  let answer = solvePow(challenge.challenge, challenge.salt, challenge.expire_at, challenge.difficulty, 1);
+  let round = 1;
+  if (answer === null) { round = 0; answer = solvePow(challenge.challenge, challenge.salt, challenge.expire_at, challenge.difficulty, 0); }
+  if (answer === null) return { error: 'the token works, but the proof-of-work could not be solved — the site\'s puzzle has changed' };
+
+  try { await chrome.storage.local.set({ deepseekPowRound: round }); } catch { /* best effort: only saves a retry */ }
+  const ms = Date.now() - t0;
+  return {
+    ok: true,
+    note: `Token works. Proof-of-work solved in ${ms} ms ` +
+          `(answer ${answer}, difficulty ${challenge.difficulty}, ${round ? 'round-skipping' : 'standard'} digest).`,
+  };
+}
+
 /* ------------------------------------------------------------- messaging */
 
 chrome.runtime.onMessage.addListener((msg, sender, respond) => {
@@ -777,6 +1204,16 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
 
   if (msg.type === 'ask') {
     ask(msg.payload)
+      .then(respond)
+      .catch(e => respond({ error: String(e) }));
+    return true;
+  }
+
+  // Options checks a DeepSeek token with this: ask for a challenge and answer it, exactly as a
+  // real question would, but without sending anything to the model. It proves the token is live
+  // and that the proof-of-work is being solved correctly.
+  if (msg.type === 'deepseek-test') {
+    deepseekSelfTest(String(msg.token || '').trim())
       .then(respond)
       .catch(e => respond({ error: String(e) }));
     return true;
