@@ -184,6 +184,12 @@
   <div class="keyrow"><button class="ghost small" id="openGemini" type="button">Open gemini.google.com</button></div>
   </div>
 
+  <div id="chatFields" hidden>
+  <label class="check" for="reuseChat"><input id="reuseChat" type="checkbox"> Keep using one chat</label>
+  <div class="hint">Both of these sites list every conversation in a sidebar, so a new chat for every question fills it with hundreds of one-line threads. With this on, the questions go into one chat instead. The catch is that the chat remembers the earlier questions, which is usually harmless but can colour an answer; to keep that small, a new chat is started after 30 questions, and whenever the model or the account changes. If the chat is deleted from the site, a new one is started by itself. Turn it off for a separate chat per question.</div>
+  <div class="keyrow"><button class="ghost small" id="newChat" type="button">Start a new chat with the next question</button></div>
+  </div>
+
   <label for="answerDelay">Delay after clicking an answer (ms)</label>
   <input id="answerDelay" type="number" min="0" max="3000" step="20">
   <div class="hint">Raise this if Submit stays greyed out after picking an answer — the page needs time to register the selection.</div>

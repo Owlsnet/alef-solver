@@ -356,6 +356,45 @@ const STUB = (store = {}) => `
   check('a level that is not one of the site\'s falls back to standard rather than being sent',
     await val('geminiWebThinking') === '', await val('geminiWebThinking'));
 
+  /* ----------------------------------------------------------- keeping one chat */
+  console.log('\n=== Keep using one chat: the switch, who sees it, and the new-chat button ===');
+  const checkedBox = id => ev(`document.getElementById('${id}').checked`);
+
+  // Only the two services that have chats of their own have anything to keep.
+  await open({});
+  for (const [service, expectShown] of [
+    ['openrouter', false], ['gemini', false], ['openai', false], ['deepseek', true], ['gemini-web', true],
+  ]) {
+    await choose(service);
+    check(`the chat switch is ${expectShown ? 'offered' : 'not offered'} for ${service}`, await shown('chatFields') === expectShown);
+  }
+
+  await open({});
+  check('it is on for a fresh install, since one chat is the point', await checkedBox('reuseChat') === true);
+  await open({ reuseChat: false });
+  check('and stays off once switched off', await checkedBox('reuseChat') === false);
+  await open({ reuseChat: true });
+  check('and on once switched on', await checkedBox('reuseChat') === true);
+
+  await open({ provider: 'deepseek' });
+  await ev(`(() => { const e = document.getElementById('reuseChat'); e.checked = false; e.dispatchEvent(new Event('change', { bubbles: true })); return 'ok'; })()`);
+  await click('save');
+  st = await ev(`JSON.stringify(window.__store)`).then(JSON.parse);
+  check('saving keeps the switch off', st.reuseChat === false, JSON.stringify(st.reuseChat));
+  await open({ provider: 'deepseek', reuseChat: false });
+  await ev(`(() => { const e = document.getElementById('reuseChat'); e.checked = true; e.dispatchEvent(new Event('change', { bubbles: true })); return 'ok'; })()`);
+  await click('save');
+  st = await ev(`JSON.stringify(window.__store)`).then(JSON.parse);
+  check('and keeps it on', st.reuseChat === true, JSON.stringify(st.reuseChat));
+
+  // The button is an action, not a setting: it works at once and needs no Save.
+  await open({ provider: 'gemini-web', geminiWebChat: { cid: 'c', rid: 'r', rcid: 'rc', turns: 4 }, deepseekChat: { sessionId: 's', parentId: 9, turns: 2 } });
+  await click('newChat');
+  st = await ev(`JSON.stringify(window.__store)`).then(JSON.parse);
+  check('the new-chat button forgets the saved chat on both sites at once', st.geminiWebChat === null && st.deepseekChat === null, JSON.stringify({ g: st.geminiWebChat, d: st.deepseekChat }));
+  check('and says what happens next', /next question will start a new chat/i.test(await status()), await status());
+  check('without touching any other setting', st.provider === 'gemini-web');
+
   s.close();
   console.log(`\n${fail === 0 ? '✓ all' : '✗'} ${pass} passed, ${fail} failed\n`);
   cleanup();

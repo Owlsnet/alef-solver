@@ -433,6 +433,30 @@ const streamPart = text => framed([
   check('the slots the site leaves empty are left empty', inner.filter(x => x === null).length > 50, String(inner.filter(x => x === null).length));
   check('the conversation metadata is the site\'s own empty shape', j(inner[2]) === j(['', '', '', null, null, null, null, null, null, '']), j(inner[2]));
 
+  // Continuing a conversation names the last turn's three ids in the first three places of that
+  // same slot, and changes nothing else. Anything that is not three real ids starts a new one.
+  script(ok(genPart('x')));
+  await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q?', model, chat: ['c_1', 'r_1', 'rc_1'] });
+  const innerChat = JSON.parse(reqOf(sent.find(c => c.url.includes('StreamGenerate')))[1]);
+  check('a continued conversation names its three ids and keeps the rest of the shape',
+    j(innerChat[2]) === j(['c_1', 'r_1', 'rc_1', null, null, null, null, null, null, '']), j(innerChat[2]));
+  check('and the prompt, model and thinking slots are untouched by it',
+    innerChat[0][0] === 'Q?' && innerChat[79] === 1 && innerChat[80] === 1);
+
+  for (const [why, bad] of [
+    ['a missing id', ['c_1', '', 'rc_1']],
+    ['too few ids', ['c_1', 'r_1']],
+    ['ids that are not strings', [1, 2, 3]],
+    ['something that is not a list', 'c_1'],
+    ['nothing at all', null],
+  ]) {
+    script(ok(genPart('x')));
+    await ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q?', model, chat: bad });
+    const got = JSON.parse(reqOf(sent.find(c => c.url.includes('StreamGenerate')))[1])[2];
+    check(`${why} starts a new conversation rather than naming one the site would not know`,
+      j(got) === j(['', '', '', null, null, null, null, null, null, '']), j(got));
+  }
+
   // The site numbers its thinking levels out of order — medium is 4, high is 2 — so the words
   // are mapped here rather than passed straight through.
   for (const [level, wire, where] of [['low', 1, 'low'], ['medium', 4, 'medium'], ['high', 2, 'extended']]) {
@@ -558,6 +582,9 @@ const streamPart = text => framed([
     script(ok(errPart(code)));
     r = await ask({ type: 'gw-generate', session: { at: 'T', hl: 'en' }, prompt: 'Q', model });
     check(`error ${code} comes back as something a person can act on`, r.ok === true && want.test(r.failure || ''), r.failure);
+    // The number travels with the words: the worker decides from it whether a fresh conversation
+    // could help (a deleted one can; an empty allowance cannot).
+    check(`and error ${code} carries its number as well`, r.code === code, String(r.code));
   }
 
   script(ok(errPart(9999)));

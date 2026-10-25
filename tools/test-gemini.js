@@ -439,7 +439,9 @@ const useGemini = (extra = {}) => { store = { provider: 'gemini', geminiKey: KEY
   /* ---------------------------------------------------------------- DeepSeek */
   console.log('\nDeepSeek, the account\'s own chat login');
   const DKEY = 'ds-token-FAKE-0123456789';
-  const useDeepSeek = (extra = {}) => { store = { provider: 'deepseek', deepseekToken: DKEY, ...extra }; };
+  // These tests are about the request of ONE question, thread and all, so they run with the chat
+  // kept off; keeping one chat going has its own section below, with it on as it is by default.
+  const useDeepSeek = (extra = {}) => { store = { provider: 'deepseek', deepseekToken: DKEY, reuseChat: false, ...extra }; };
   // The challenge the site hands out, with an answer the solver can actually find.
   const SALT = 'testsalt', EXPIRE = 1700000000, NONCE = 4242;
   const round1 = toHex(ctx.deepseekHash(ctx.utf8(`${SALT}_${EXPIRE}_${NONCE}`), 1));
@@ -548,6 +550,209 @@ const useGemini = (extra = {}) => { store = { provider: 'gemini', geminiKey: KEY
   calls = script(biz({}));
   res = await ctx.ask(mcq());
   check('no token set: the old no-credential message, naming the right service', /DeepSeek token/.test(res.error || '') && calls.length === 0, res.error);
+
+  /* ---------------------------------------------------------- one chat, not one per question */
+  console.log('\nDeepSeek: one chat is kept going instead of a new one per question');
+  const ANS = '{"answer":"B","index":1}';
+  const sseId = (text, id) => ({
+    ok: true, status: 200, json: async () => ({}),
+    text: async () => [`data: ${JSON.stringify({ v: { response: { ...(id === undefined ? {} : { message_id: id }), fragments: [{ type: 'RESPONSE', content: text }] } } })}`, 'data: [DONE]'].join('\n'),
+  });
+  const newThread = id => biz({ chat_session: { id } });
+  const dsOld = (over = {}) => ({ sessionId: 'sess-old', parentId: 500, turns: 5, model: 'default', at: 1, ...over });
+  const useDsChat = (extra = {}) => { store = { provider: 'deepseek', deepseekToken: DKEY, ...extra }; };   // reuseChat at its default
+
+  useDsChat();
+  calls = script(newThread('sess-1'), biz({ challenge }), sseId(ANS, 777));
+  res = await ctx.ask(mcq());
+  check('the first question makes a thread, with no parent message', res.index === 1 && calls.length === 3 && /chat_session\/create$/.test(calls[0].url) && calls[2].body.parent_message_id === null, j(calls.map(c => c.url.split('/api/v0')[1])));
+  check('and the thread is remembered, with the assistant\'s message id to continue from',
+    store.deepseekChat?.sessionId === 'sess-1' && store.deepseekChat?.parentId === 777 && store.deepseekChat?.turns === 1 && store.deepseekChat?.model === 'default', j(store.deepseekChat));
+  check('the login is not kept in it', !j(store.deepseekChat).includes(DKEY));
+
+  calls = script(biz({ challenge }), sseId(ANS, 778));
+  res = await ctx.ask(mcq());
+  check('the second question makes no new thread: only a challenge, then the completion', res.index === 1 && calls.length === 2 && isChallenge(calls[0]) && isCompletion(calls[1]), j(calls.map(c => c.url.split('/api/v0')[1])));
+  check('it goes into the same thread, hanging from the assistant\'s last message', calls[1].body.chat_session_id === 'sess-1' && calls[1].body.parent_message_id === 777, j({ s: calls[1].body.chat_session_id, p: calls[1].body.parent_message_id }));
+  check('it still carries its own proof of work', !!calls[1].headers['x-ds-pow-response']);
+  check('and the count goes up, with the new reply to continue from', store.deepseekChat.turns === 2 && store.deepseekChat.parentId === 778, j(store.deepseekChat));
+
+  calls = script(biz({ challenge }), sseId(ANS, 779));
+  await ctx.ask(mcq());
+  check('the third hangs from the second\'s reply, not the first\'s', calls[1].body.parent_message_id === 778, String(calls[1].body.parent_message_id));
+
+  // The switch: off means a thread per question, and neither reads nor disturbs a saved one.
+  useDsChat({ reuseChat: false, deepseekChat: dsOld() });
+  calls = script(newThread('sess-9'), biz({ challenge }), sseId(ANS, 1));
+  res = await ctx.ask(mcq());
+  check('with the switch off every question makes its own thread', calls.length === 3 && calls[2].body.chat_session_id === 'sess-9' && calls[2].body.parent_message_id === null);
+  check('and a saved chat is left alone', store.deepseekChat.sessionId === 'sess-old' && store.deepseekChat.turns === 5, j(store.deepseekChat));
+
+  // A thread is only continued while it is the same model it started with.
+  useDsChat({ deepseekModel: 'deepseek-expert', deepseekChat: dsOld() });
+  calls = script(newThread('sess-e'), biz({ challenge }), sseId(ANS, 800));
+  await ctx.ask(mcq());
+  check('a different model starts a new thread', calls.length === 3 && calls[2].body.chat_session_id === 'sess-e' && calls[2].body.model_type === 'expert', j(calls[2].body));
+  check('and that thread is the one remembered now', store.deepseekChat.sessionId === 'sess-e' && store.deepseekChat.model === 'expert' && store.deepseekChat.turns === 1, j(store.deepseekChat));
+
+  // A thread is retired after a fixed number of questions, so its memory of them stays small.
+  useDsChat({ deepseekChat: dsOld({ turns: 29 }) });
+  calls = script(biz({ challenge }), sseId(ANS, 601));
+  await ctx.ask(mcq());
+  check('the last question a thread has room for still goes into it', calls.length === 2 && calls[1].body.chat_session_id === 'sess-old' && store.deepseekChat.turns === 30, j(store.deepseekChat));
+  calls = script(newThread('sess-n'), biz({ challenge }), sseId(ANS, 602));
+  await ctx.ask(mcq());
+  check('and the one after that starts a new thread', calls.length === 3 && calls[2].body.chat_session_id === 'sess-n' && calls[2].body.parent_message_id === null && store.deepseekChat.turns === 1, j(store.deepseekChat));
+
+  // If the thread has been deleted from the site, the question is asked again in a fresh one.
+  useDsChat({ deepseekChat: dsOld() });
+  calls = script(biz({ challenge }), fail_(400, '{"code":40003,"msg":"chat session not found"}'), newThread('sess-2'), biz({ challenge }), sseId(ANS, 901));
+  res = await ctx.ask(mcq());
+  check('a thread the site will not continue is replaced, and the question still gets answered', res.index === 1 && !res.error && calls.length === 5, j({ n: calls.length, e: res.error }));
+  check('the first try was in the old thread, the second in a new one with no parent', calls[1].body.chat_session_id === 'sess-old' && calls[4].body.chat_session_id === 'sess-2' && calls[4].body.parent_message_id === null);
+  check('the new thread is what is remembered', store.deepseekChat.sessionId === 'sess-2' && store.deepseekChat.parentId === 901 && store.deepseekChat.turns === 1, j(store.deepseekChat));
+
+  // An answer with nothing in it is treated the same way.
+  useDsChat({ deepseekChat: dsOld() });
+  calls = script(biz({ challenge }), sseId('', 600), newThread('sess-3'), biz({ challenge }), sseId(ANS, 902));
+  res = await ctx.ask(mcq());
+  check('an empty answer from a continued thread is asked again in a fresh one', res.index === 1 && calls.length === 5 && calls[4].body.chat_session_id === 'sess-3', j({ n: calls.length, e: res.error }));
+
+  // But a refused login or a rate limit is the account's, and a new thread would be refused too.
+  useDsChat({ deepseekChat: dsOld() });
+  calls = script(biz({ challenge }), fail_(401, '{"code":401,"msg":"unauthorized"}'));
+  res = await ctx.ask(mcq());
+  check('a refused login is not retried in a new thread', calls.length === 2 && /refused the token/.test(res.error || ''), j({ n: calls.length, e: res.error }));
+  check('and the saved thread is kept', store.deepseekChat?.sessionId === 'sess-old' && store.deepseekChat?.turns === 5, j(store.deepseekChat));
+
+  useDsChat({ deepseekChat: dsOld() });
+  calls = script(biz({ challenge }), fail_(429, '{"code":429,"msg":"too many"}'));
+  res = await ctx.ask(mcq());
+  check('a rate limit is not retried in a new thread either', calls.length === 2 && /rate-limiting/.test(res.error || ''), j({ n: calls.length, e: res.error }));
+  check('and a failed question does not use up one of the thread\'s places', store.deepseekChat?.turns === 5, j(store.deepseekChat));
+
+  // A thread whose message id could not be read cannot be continued, so it is not kept.
+  useDsChat();
+  calls = script(newThread('sess-x'), biz({ challenge }), sseId(ANS));
+  res = await ctx.ask(mcq());
+  check('a reply with no message id is still answered', res.index === 1 && !res.error);
+  check('but nothing is remembered, so the next question starts a new thread', !store.deepseekChat, j(store.deepseekChat));
+
+  // The message id is also read from where the site has put it before: `id`, or on the frame.
+  for (const [where, frame] of [
+    ['`id` on the response', { v: { response: { id: 41, fragments: [{ type: 'RESPONSE', content: 'a' }] } } }],
+    ['`message_id` on the frame', { v: { message_id: 42, response: { fragments: [{ type: 'RESPONSE', content: 'a' }] } } }],
+    ['`id` on the frame', { v: { id: 43, response: { fragments: [{ type: 'RESPONSE', content: 'a' }] } } }],
+  ]) {
+    check(`a message id given as ${where} is found`, [41, 42, 43].includes(ctx.parseDeepseekStream(`data: ${JSON.stringify(frame)}`).messageId), where);
+  }
+  check('one that is not a whole number is not mistaken for one', ctx.parseDeepseekStream(`data: ${JSON.stringify({ v: { response: { message_id: 'abc', fragments: [{ type: 'RESPONSE', content: 'a' }] } } })}`).messageId === null);
+
+  /* ------------------------------------------------ the Gemini site: the same, through its tab */
+  console.log('\nthe Gemini site: one conversation is kept going instead of a new one per question');
+  // The service worker never talks to the site itself: it talks to a tab. This is that tab.
+  let tabLog = [], genQueue = [], genN = 0, convN = 0, tabAccount = '1';
+  const WEB_MODELS = [
+    { id: 'id-flash', name: 'gemini-flash', label: 'Flash', description: '', number: 1 },
+    { id: 'id-pro', name: 'gemini-pro', label: 'Pro', description: '', number: 3 },
+  ];
+  ctx.chrome.tabs = {
+    query: async () => [{ id: 7 }],
+    sendMessage: async (_id, msg) => {
+      tabLog.push(msg);
+      switch (msg.type) {
+        case 'gw-ping': return { ok: true };
+        case 'gw-init': return { ok: true, session: { at: 'T', hl: 'en', account: tabAccount, push: 'feeds/x' } };
+        case 'gw-models': return { ok: true, status: 1000, capacity: { capacity: 1, capacityField: 12 }, models: WEB_MODELS };
+        case 'gw-generate': {
+          const scripted = genQueue.shift();
+          if (scripted) return scripted;
+          // The site starts a conversation (new ids) when none is named, and carries on the one named.
+          const n = ++genN;
+          return { ok: true, text: ANS, done: true, cid: msg.chat ? msg.chat[0] : `c_${++convN}`, rid: `r_${n}`, rcid: `rc_${n}` };
+        }
+        default: return { ok: false, detail: 'unexpected' };
+      }
+    },
+  };
+  const useWeb = (extra = {}) => { store = { provider: 'gemini-web', ...extra }; tabLog = []; genQueue = []; genN = 0; convN = 0; tabAccount = '1'; };
+  const gens = () => tabLog.filter(m => m.type === 'gw-generate');
+  const webOld = (over = {}) => ({ cid: 'c_old', rid: 'r_old', rcid: 'rc_old', turns: 5, model: '', account: '1', at: 1, ...over });
+
+  useWeb();
+  res = await ctx.ask(mcq());
+  check('the first question starts a new conversation', res.index === 1 && gens().length === 1 && gens()[0].chat === null, j(gens().map(g => g.chat)));
+  check('and the conversation is remembered',
+    store.geminiWebChat?.cid === 'c_1' && store.geminiWebChat?.rid === 'r_1' && store.geminiWebChat?.rcid === 'rc_1' && store.geminiWebChat?.turns === 1 && store.geminiWebChat?.account === '1', j(store.geminiWebChat));
+
+  tabLog = [];
+  res = await ctx.ask(mcq());
+  check('the second question continues it, naming the last reply\'s ids', j(gens()[0].chat) === j(['c_1', 'r_1', 'rc_1']), j(gens()[0].chat));
+  check('and it is answered', res.index === 1 && !res.error);
+  check('the ids move on to the newest reply, and the count goes up', store.geminiWebChat.cid === 'c_1' && store.geminiWebChat.rid === 'r_2' && store.geminiWebChat.turns === 2, j(store.geminiWebChat));
+
+  tabLog = [];
+  await ctx.ask(mcq());
+  check('the third continues from the second\'s reply', j(gens()[0].chat) === j(['c_1', 'r_2', 'rc_2']), j(gens()[0].chat));
+  check('it is the same conversation throughout, not a new one each time', convN === 1, String(convN));
+
+  useWeb({ reuseChat: false, geminiWebChat: webOld() });
+  await ctx.ask(mcq());
+  check('with the switch off a new conversation is started', gens()[0].chat === null);
+  check('and a saved one is left alone', store.geminiWebChat.cid === 'c_old' && store.geminiWebChat.turns === 5, j(store.geminiWebChat));
+
+  useWeb({ geminiWebModel: 'gemini-pro', geminiWebChat: webOld({ model: 'id-flash' }) });
+  await ctx.ask(mcq());
+  check('a different model starts a new conversation', gens()[0].chat === null, j(gens()[0].chat));
+  check('and that one is remembered, with the model it is for', store.geminiWebChat.model === 'id-pro' && store.geminiWebChat.turns === 1 && store.geminiWebChat.cid === 'c_1', j(store.geminiWebChat));
+
+  useWeb({ geminiWebChat: webOld({ account: '0' }) });
+  await ctx.ask(mcq());
+  check('a different Google account starts a new conversation', gens()[0].chat === null && store.geminiWebChat.account === '1', j(gens()[0].chat));
+
+  useWeb({ geminiWebChat: webOld({ turns: 29 }) });
+  await ctx.ask(mcq());
+  check('the last question a conversation has room for still goes into it', j(gens()[0].chat) === j(['c_old', 'r_old', 'rc_old']) && store.geminiWebChat.turns === 30, j(store.geminiWebChat));
+  tabLog = [];
+  await ctx.ask(mcq());
+  check('and the one after that starts a new conversation', gens()[0].chat === null && store.geminiWebChat.turns === 1, j(store.geminiWebChat));
+
+  // The conversation was deleted from the site, or no longer matches: ask again in a fresh one.
+  useWeb({ geminiWebChat: webOld() });
+  genQueue = [{ ok: true, text: '', failure: 'the model no longer matches this conversation', code: 1050 }];
+  res = await ctx.ask(mcq());
+  check('a conversation the site will not continue is replaced, and the question still gets answered', res.index === 1 && !res.error && gens().length === 2, j({ n: gens().length, e: res.error }));
+  check('the first try named the old one, the second named none', j(gens()[0].chat) === j(['c_old', 'r_old', 'rc_old']) && gens()[1].chat === null);
+  check('the new conversation is what is remembered', store.geminiWebChat.cid === 'c_1' && store.geminiWebChat.turns === 1, j(store.geminiWebChat));
+
+  useWeb({ geminiWebChat: webOld() });
+  genQueue = [{ ok: false, status: 400, detail: 'bad request' }];
+  res = await ctx.ask(mcq());
+  check('a refused request in a continued conversation is asked again in a fresh one', res.index === 1 && gens().length === 2 && gens()[1].chat === null, j({ n: gens().length, e: res.error }));
+
+  useWeb({ geminiWebChat: webOld() });
+  genQueue = [{ ok: true, text: '', done: true, cid: 'c_old', rid: 'r_x', rcid: 'rc_x' }];
+  res = await ctx.ask(mcq());
+  check('an empty answer from a continued conversation is asked again in a fresh one', res.index === 1 && gens().length === 2 && gens()[1].chat === null, j({ n: gens().length, e: res.error }));
+
+  // An empty allowance, a rate limit or a block belongs to the account; a new conversation would meet it too.
+  for (const [code, label] of [[1037, 'an empty allowance'], [1013, 'a temporary error'], [1060, 'a blocked address']]) {
+    useWeb({ geminiWebChat: webOld() });
+    genQueue = [{ ok: true, text: '', failure: `site said ${code}`, code }];
+    res = await ctx.ask(mcq());
+    check(`${label} is not retried in a new conversation`, gens().length === 1 && !!res.error, j({ n: gens().length, e: res.error }));
+    check(`and the saved conversation survives ${label}`, store.geminiWebChat.cid === 'c_old' && store.geminiWebChat.turns === 5, j(store.geminiWebChat));
+  }
+
+  useWeb({ geminiWebChat: webOld() });
+  genQueue = [{ ok: false, status: 429, detail: 'slow down' }];
+  res = await ctx.ask(mcq());
+  check('an HTTP rate limit is not retried in a new conversation either', gens().length === 1 && !!res.error, j({ n: gens().length, e: res.error }));
+
+  useWeb();
+  genQueue = [{ ok: true, text: ANS, done: true }];
+  await ctx.ask(mcq());
+  check('a reply that came back without its ids is answered but not kept', !store.geminiWebChat, j(store.geminiWebChat));
 
   console.log('\nOpenRouter and the others are unchanged by any of this');
   store = { apiKey: 'sk-or-v1-abc' };

@@ -28,6 +28,7 @@ const DEFAULTS = {
   geminiWebFallbackModel: '',
   geminiWebThinking: '',           // '' | 'low' | 'medium' | 'high' — the site's own thinking levels; '' is standard
   geminiWebModels: [],             // the models the site says this account may use, as discovered
+  reuseChat: true,                 // DeepSeek and the Gemini site: keep one chat going instead of starting a new one per question
   autoSubmit: true,
   openPassage: true,
   screenshot: 'auto', // 'auto' | 'always' | 'never'
@@ -45,6 +46,41 @@ async function settings() {
   if (out.geminiWebThinking === true) out.geminiWebThinking = 'high';
   if (!GW_THINKING_LEVELS.includes(out.geminiWebThinking)) out.geminiWebThinking = '';
   return out;
+}
+
+/* ------------------------------------------------------------- keeping one chat */
+
+/* The two sites that have chats of their own (DeepSeek and the Gemini site) list every
+ * conversation in a sidebar, so a new one per question buries the person's own chats under
+ * hundreds of one-line threads. Each of them is therefore given a single thread that later
+ * questions continue. What is kept is only the ids that let the site find that thread again.
+ *
+ * Two costs of this are handled rather than ignored. Earlier questions stay in the thread's
+ * context, so it is retired after CHAT_MAX_TURNS and a new one started; and a thread can vanish
+ * (deleted from the sidebar) or stop matching (another model, another account), in which case
+ * the question is asked again in a fresh thread rather than failing. */
+const CHAT_MAX_TURNS = 30;
+const GW_CHAT_KEY = 'geminiWebChat';
+const DS_CHAT_KEY = 'deepseekChat';
+
+async function chatLoad(key) {
+  try {
+    const v = (await chrome.storage.local.get(key))?.[key];
+    return v && typeof v === 'object' ? v : null;
+  } catch { return null; }
+}
+async function chatSave(key, value) {
+  try { await chrome.storage.local.set({ [key]: value }); } catch { /* losing it only costs a new thread */ }
+}
+async function chatClear(key) {
+  try { await chrome.storage.local.set({ [key]: null }); } catch { /* as above */ }
+}
+
+/** Whether a saved thread may be continued: it has room left, and every field in `match`
+ *  (the model, the account) is still what it was when the thread was started. */
+function chatUsable(chat, match) {
+  return !!chat && Number.isInteger(chat.turns) && chat.turns > 0 && chat.turns < CHAT_MAX_TURNS
+    && Object.entries(match).every(([k, v]) => chat[k] === v);
 }
 
 /* --------------------------------------------------------------- prompt */
@@ -681,8 +717,12 @@ function parseDeepseekStream(raw) {
       for (const f of v.response.fragments || []) {
         if (f?.type === 'RESPONSE' && f.content) { path = 'response/fragments/-1/content'; text += f.content; }
       }
-      const id = v.response.message_id ?? v.message_id;
-      if (Number.isInteger(id)) messageId = id;
+      // The assistant's message id is what the next question in the same thread hangs from. The
+      // site has put it under `message_id` or `id`, on the response or on the frame itself.
+      for (const holder of [v.response, v]) {
+        const id = holder?.message_id ?? holder?.id;
+        if (Number.isInteger(id)) { messageId = id; break; }
+      }
     } else if (Number.isInteger(v) && /message_id$/.test(path)) {
       messageId = v;
     } else if (typeof v === 'string' && /content$/.test(path) && !/thinking/.test(path)) {
@@ -703,22 +743,73 @@ async function deepseekComplete(cfg, body, model, thinkingOff) {
   // The site takes one text prompt and its own pictures; the system prompt rides along on top.
   const prompt = [body.messages[0].content, '', ...user.content.filter(c => c.type === 'text').map(c => c.text)].join('\n');
 
-  const sessionId = await dsNewSession(token);
-  if (sessionId.refused) return sessionId.refused;
+  // One thread is kept going rather than a new one per question (see "keeping one chat"). It can
+  // only be continued from the assistant's last message id, so a thread whose id was never read
+  // is not kept at all: the next question simply starts a new one, as it always did.
+  const reuse = cfg.reuseChat !== false;
+  let saved = reuse ? await chatLoad(DS_CHAT_KEY) : null;
+  if (saved && !(saved.sessionId && Number.isInteger(saved.parentId) && chatUsable(saved, { model: modelType }))) saved = null;
+
+  let round = await dsRound(cfg, token, prompt, modelType, thinkingOff, saved);
+  // The thread was deleted, or the site would not continue it: ask again in a fresh one, once.
+  // A refused token or a rate limit would fail the same way again, so those are not retried.
+  if (saved && dsChatLost(round)) {
+    await chatClear(DS_CHAT_KEY);
+    saved = null;
+    round = await dsRound(cfg, token, prompt, modelType, thinkingOff, null);
+  }
+  if (round.res) return round.res;             // the caller's ordinary status handling takes it from here
+
+  if (reuse && round.sessionId && Number.isInteger(round.messageId) && round.text) {
+    await chatSave(DS_CHAT_KEY, {
+      sessionId: round.sessionId, parentId: round.messageId,
+      turns: (saved?.turns || 0) + 1, model: modelType, at: Date.now(),
+    });
+  }
+
+  // Hand it back in the shape the rest of this file already knows how to read.
+  return {
+    ok: true,
+    status: 200,
+    text: async () => round.raw,
+    json: async () => ({ choices: [{ message: { content: round.text }, finish_reason: round.finish || 'stop' }] }),
+  };
+}
+
+/** Whether a failed round says the thread itself is the problem. A refused token or a rate limit
+ *  is the account's, and a challenge that would not come is the site's; none of them is helped by
+ *  a new thread. An answer with nothing in it is. */
+function dsChatLost(round) {
+  if (round.res) return round.stage === 'completion' && ![401, 403, 429].includes(round.res.status);
+  return !round.text;
+}
+
+/** One trip to the site: a thread (new, or the one given), a challenge, its answer, and the
+ *  streamed reply. Returns either `{ res, stage }` — a response that was not ok, to be handled by
+ *  the caller — or the reply read out of the stream along with the thread it belongs to. */
+async function dsRound(cfg, token, prompt, modelType, thinkingOff, chat) {
+  let sessionId;
+  if (chat) {
+    sessionId = chat.sessionId;
+  } else {
+    const made = await dsNewSession(token);
+    if (made.refused) return { res: made.refused, stage: 'session' };
+    sessionId = made.sessionId;
+  }
 
   const challengeRes = await dsCall(DS_CHALLENGE, token, { target_path: DS_COMPLETION });
-  if (!challengeRes.ok) return challengeRes;
+  if (!challengeRes.ok) return { res: challengeRes, stage: 'challenge' };
   const challenge = dsBiz(await challengeRes.json()).challenge;
   if (!challenge?.challenge) throw new Error('DeepSeek sent no proof-of-work challenge');
 
   // Which digest variant answered last time, so the next question does not try both. A wrong
   // guess costs one wasted search, so this is an optimisation only — never a correctness risk.
-  const round = cfg.deepseekPowRound === 0 || cfg.deepseekPowRound === 1 ? cfg.deepseekPowRound : 1;
-  let answer = solvePow(challenge.challenge, challenge.salt, challenge.expire_at, challenge.difficulty, round);
-  let usedRound = round;
+  const powRound = cfg.deepseekPowRound === 0 || cfg.deepseekPowRound === 1 ? cfg.deepseekPowRound : 1;
+  let answer = solvePow(challenge.challenge, challenge.salt, challenge.expire_at, challenge.difficulty, powRound);
+  let usedRound = powRound;
   if (answer === null) {
     // The two variants are indistinguishable from the outside; whichever answers is the real one.
-    usedRound = round === 1 ? 0 : 1;
+    usedRound = powRound === 1 ? 0 : 1;
     answer = solvePow(challenge.challenge, challenge.salt, challenge.expire_at, challenge.difficulty, usedRound);
   }
   if (answer === null) throw new Error(`could not solve the proof-of-work challenge (difficulty ${challenge.difficulty})`);
@@ -729,8 +820,10 @@ async function deepseekComplete(cfg, body, model, thinkingOff) {
   }
 
   const res = await dsCall(DS_COMPLETION, token, {
-    chat_session_id: sessionId.sessionId,
-    parent_message_id: null,
+    chat_session_id: sessionId,
+    // In a continued thread the new message hangs from the assistant's last one; a new thread
+    // has no parent.
+    parent_message_id: chat ? chat.parentId : null,
     prompt,
     ref_file_ids: [],
     thinking_enabled: !!(cfg.deepseekThinking && !thinkingOff),
@@ -740,16 +833,9 @@ async function deepseekComplete(cfg, body, model, thinkingOff) {
     model_type: modelType,
   }, { 'x-ds-pow-response': powHeader(challenge, answer) });
 
-  if (!res.ok) return res;                     // the caller's ordinary status handling takes it from here
+  if (!res.ok) return { res, stage: 'completion' };
   const raw = await res.text();
-  const { text, finish } = parseDeepseekStream(raw);
-  // Hand it back in the shape the rest of this file already knows how to read.
-  return {
-    ok: true,
-    status: 200,
-    text: async () => raw,
-    json: async () => ({ choices: [{ message: { content: text }, finish_reason: finish || 'stop' }] }),
-  };
+  return { raw, sessionId, ...parseDeepseekStream(raw) };
 }
 
 /* ------------------------------------------------- Gemini, on the site itself */
@@ -901,6 +987,16 @@ async function gwUpload(dataUrl, pushId) {
   return { ok: true, url, name };
 }
 
+/** Whether a reply to a continued conversation says the conversation itself is the problem — gone
+ *  from the site, or tied to a different model — rather than the account being out of allowance,
+ *  rate limited or blocked, which a fresh conversation would not cure. */
+function gwChatLost(out) {
+  if (!out) return false;
+  if (!out.ok) return ![401, 403, 429].includes(out.status);
+  if (out.failure) return ![1037, 1013, 1060].includes(out.code);
+  return !out.text;
+}
+
 /** The session, the model list, and the answer — all inside the tab. */
 async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
   const tab = await gwTab();
@@ -951,7 +1047,15 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
     fileData = [[[up.url], up.name]];
   }
 
-  const out = await gwCall(tab.id, {
+  // One conversation is kept going rather than a new one per question (see "keeping one chat").
+  // It is only continued while it is the same account and the same model it was started with.
+  const reuse = cfg.reuseChat !== false;
+  const modelKey = model?.id || '';
+  const accountKey = session.account || '';
+  let saved = reuse ? await chatLoad(GW_CHAT_KEY) : null;
+  if (saved && !(saved.cid && saved.rid && saved.rcid && chatUsable(saved, { account: accountKey, model: modelKey }))) saved = null;
+
+  const generate = chat => gwCall(tab.id, {
     type: 'gw-generate',
     session,
     prompt,
@@ -960,13 +1064,31 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
     // same amount; the account's own saved level is used otherwise.
     thinking: thinkingOff ? 'low' : (cfg.geminiWebThinking || ''),
     fileData,
+    chat: chat ? [chat.cid, chat.rid, chat.rcid] : null,
   });
+
+  let out = await generate(saved);
+  // The conversation was deleted from the site's list, or it would not be continued: ask again in
+  // a fresh one, once. An empty allowance or a rate limit would fail the same way again.
+  if (saved && gwChatLost(out)) {
+    await chatClear(GW_CHAT_KEY);
+    saved = null;
+    out = await generate(null);
+  }
+
   if (!out.ok) {
     return { ok: false, status: out.status || 502, text: async () => JSON.stringify({
       error: { message: out.detail || 'the Gemini page refused the request' } }) };
   }
   if (out.failure) {
     return { ok: false, status: 429, text: async () => JSON.stringify({ error: { message: out.failure } }) };
+  }
+
+  if (reuse && out.text && out.cid && out.rid && out.rcid) {
+    await chatSave(GW_CHAT_KEY, {
+      cid: out.cid, rid: out.rid, rcid: out.rcid,
+      turns: (saved?.turns || 0) + 1, model: modelKey, account: accountKey, at: Date.now(),
+    });
   }
 
   const finish = out.done ? 'stop' : 'length';

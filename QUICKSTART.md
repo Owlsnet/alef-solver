@@ -48,6 +48,9 @@ Same idea as DeepSeek — your own account, no key to buy — but it works diffe
 
 The good news compared with DeepSeek: **it reads pictures**, so diagram questions work, and there is no anti-bot puzzle slowing every question down. Leave the model box on the default unless you have a reason not to — the default is the one model every account has, and some of the others only work on a paid account. **Thinking** (Standard, Low, Medium, Extended) controls how long it reasons before answering: higher is slower and uses the account's allowance faster, so leave it on Standard unless a question needs the extra room. The account's allowance is shared, so a long lesson run can use it up; the status line says so if that happens.
 
+### One chat, not hundreds
+
+On DeepSeek and the Gemini login, every question goes into the same chat instead of starting a new one, so your chat list on those sites stays tidy. The chat remembers the earlier questions, which is usually harmless; to keep it from drifting, a fresh chat is started after 30 questions, and whenever you change the model or the Google account. If you delete the chat on the site, the next question just starts a new one. In Options, **Keep using one chat** turns this off, and **Start a new chat with the next question** ends the current chat on the spot — handy if the answers start to look influenced by earlier questions.
 
 ## 3. Answer something
 

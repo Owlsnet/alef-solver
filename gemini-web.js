@@ -155,6 +155,17 @@ function gwSourcePath(account = gwAccount()) {
   return account ? `/u/${account}/app` : '/app';
 }
 
+/** The conversation slot of a request. A new conversation sends it empty; continuing one sends
+ *  the three ids the site gave back for the last turn — the conversation, the reply and the
+ *  chosen candidate — in the first three places, with the rest left as in an empty one. Ids that
+ *  are not all non-empty strings are not a conversation, so the request starts a new one rather
+ *  than naming something the site would not recognise. */
+function gwChatMetadata(chat) {
+  const ids = Array.isArray(chat) ? chat.slice(0, 3) : [];
+  if (ids.length !== 3 || !ids.every(id => typeof id === 'string' && id)) return GW_METADATA;
+  return [...ids, ...GW_METADATA.slice(3)];
+}
+
 /** The three thinking levels the site's request takes, as it numbers them. The numbers are not
  *  in the order the words are — the protocol puts `medium` at 4, above `high` at 2 — so the
  *  words are what a person picks and these are only what goes on the wire. An unnamed level is
@@ -385,7 +396,7 @@ function gwSlug(value) {
 /** One question. Returns the answer text, what the model was thinking if it says, and why it
  *  stopped — in the same shape every other provider in this extension returns. */
 async function gwGenerate(session, opts) {
-  const { prompt, model, thinking, fileData } = opts;
+  const { prompt, model, thinking, fileData, chat } = opts;
   const modelNumber = model?.number || 1;
   const level = gwThinkingLevel(thinking);
 
@@ -395,7 +406,7 @@ async function gwGenerate(session, opts) {
   const uuid = gwSessionId();
   inner[0] = [prompt, 0, null, fileData || null, null, null, 0];
   inner[1] = [session.hl];
-  inner[2] = GW_METADATA;
+  inner[2] = gwChatMetadata(chat);
   inner[6] = [1];
   inner[7] = 1;                    // streaming
   inner[10] = 1;
@@ -577,7 +588,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
           const words = out.code === -1
             ? 'the site refused the question without saying why — the login may have expired'
             : GW_ERRORS[out.code] || `the site reported error ${out.code}`;
-          return { ok: true, text: '', failure: words };
+          return { ok: true, text: '', failure: words, code: out.code };
         }
         return out;
       }

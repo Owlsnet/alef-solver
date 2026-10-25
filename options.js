@@ -1,7 +1,7 @@
 const FIELDS = ['provider', 'apiKey', 'model', 'fallbackModel', 'geminiKey', 'geminiModel', 'geminiFallbackModel',
                 'openaiKey', 'openaiModel', 'openaiFallbackModel',
                 'deepseekToken', 'deepseekModel', 'deepseekThinking', 'deepseekSearch',
-                'geminiWebModel', 'geminiWebFallbackModel', 'geminiWebThinking', 'geminiWebModels',
+                'geminiWebModel', 'geminiWebFallbackModel', 'geminiWebThinking', 'geminiWebModels', 'reuseChat',
                 'answerDelay', 'stepDelay', 'retries', 'devMode', 'hotkeys', 'maxLessons'];
 const GEMINI_API = 'https://generativelanguage.googleapis.com/v1beta';
 const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
@@ -142,6 +142,7 @@ async function load() {
   document.getElementById('geminiWebModel').value = s.geminiWebModel || '';
   document.getElementById('geminiWebFallbackModel').value = s.geminiWebFallbackModel || '';
   document.getElementById('geminiWebThinking').value = s.geminiWebThinking === true ? 'high' : (s.geminiWebThinking || '');
+  document.getElementById('reuseChat').checked = s.reuseChat !== false;     // on unless switched off
   showProvider();
   document.getElementById('answerDelay').value = s.answerDelay ?? 120;
   document.getElementById('stepDelay').value = s.stepDelay ?? 250;
@@ -158,6 +159,8 @@ function showProvider() {
   document.getElementById('openaiFields').hidden = which !== 'openai';
   document.getElementById('deepseekFields').hidden = which !== 'deepseek';
   document.getElementById('geminiWebFields').hidden = which !== 'gemini-web';
+  // Only these two have chats of their own to keep, so the choice is only offered for them.
+  document.getElementById('chatFields').hidden = which !== 'deepseek' && which !== 'gemini-web';
   // There is no key to test for the Gemini-site login, so the button says what it actually does
   // there. Its own hint tells the person to press this by name, so the two must agree.
   document.getElementById('test').textContent = which === 'gemini-web' ? 'Test login' : 'Test key';
@@ -193,6 +196,7 @@ function read() {
     geminiWebModel: document.getElementById('geminiWebModel').value,
     geminiWebFallbackModel: document.getElementById('geminiWebFallbackModel').value,
     geminiWebThinking: document.getElementById('geminiWebThinking').value,
+    reuseChat: document.getElementById('reuseChat').checked,
     answerDelay: num('answerDelay', 3000),
     stepDelay: num('stepDelay', 5000),
     retries: num('retries', 10),
@@ -438,6 +442,17 @@ async function testGeminiWeb() {
     status(`✗ ${e.message || e}`, 'bad');
   }
 }
+
+/** Forget the saved chats, so the next question starts a new one on each site. This acts at once
+ *  and does not wait for Save: it is an action, not a setting. */
+document.getElementById('newChat').addEventListener('click', async () => {
+  try {
+    await chrome.storage.local.set({ geminiWebChat: null, deepseekChat: null });
+    status('The next question will start a new chat.', 'ok');
+  } catch (e) {
+    status(`✗ ${e.message || e}`, 'bad');
+  }
+});
 
 document.getElementById('openGemini').addEventListener('click', () => {
   chrome.tabs.create({ url: 'https://gemini.google.com/app' });
