@@ -935,6 +935,103 @@ const useGemini = (extra = {}) => { store = { provider: 'gemini', geminiKey: KEY
   check('another service gets a total and none of the stages it does not have',
     res.index === 1 && Number.isFinite(res.timing.total) && res.timing.setup === undefined && res.timing.ai === undefined && res.timing.mode.provider === 'openrouter', j(res.timing));
 
+  /* --------------------------------------------- a rate limit is a wait, so the answer says so */
+  console.log('\nA rate limit is flagged, so the page can wait and ask again');
+  const limitRes = (status, body = '', retryAfter = null) => ({
+    ok: false, status, json: async () => ({}), text: async () => body,
+    headers: { get: h => (h.toLowerCase() === 'retry-after' ? retryAfter : null) },
+  });
+
+  useDeepSeek();
+  script(newThread('s'), biz({ challenge }), limitRes(429, '{"code":429}'));
+  res = await ctx.ask(mcq());
+  check('DeepSeek turning the account away is flagged, with the reason to show while waiting',
+    res.rateLimited === true && /DeepSeek is rate-limiting this account/.test(res.limitNote) && res.retryAfterMs === 0, j({ r: res.rateLimited, n: res.limitNote, ms: res.retryAfterMs }));
+  check('and it is still an error with the full reason, for anything that does not wait', /rate-limiting this account \(HTTP 429\)/.test(res.error || ''), res.error);
+  script(newThread('s'), biz({ challenge }), limitRes(429, '', '7'));
+  res = await ctx.ask(mcq());
+  check('a Retry-After in seconds is passed on, in milliseconds', res.retryAfterMs === 7000, String(res.retryAfterMs));
+  script(newThread('s'), biz({ challenge }), limitRes(429, '', new Date(Date.now() + 20000).toUTCString()));
+  res = await ctx.ask(mcq());
+  check('and so is one given as a date', res.retryAfterMs >= 17000 && res.retryAfterMs <= 21000, String(res.retryAfterMs));
+  script(newThread('s'), biz({ challenge }), limitRes(401, '{"code":401,"msg":"unauthorized"}'));
+  res = await ctx.ask(mcq());
+  check('a refused login is not a rate limit', !!res.error && res.rateLimited === undefined, j(res.rateLimited));
+
+  // The Gemini site's own codes: the ones that mean "not now" are waited out, the others are not.
+  for (const code of [1013, 1037, 1060, 1095]) {
+    useWeb({ reuseChat: false });
+    genQueue = [{ ok: true, text: '', failure: `site said ${code}`, code }];
+    res = await ctx.ask(mcq());
+    check(`Gemini site code ${code} is one to wait out`, res.rateLimited === true && res.limitNote === `the Gemini site is limiting this account (error ${code})`, j(res.limitNote));
+  }
+  for (const code of [1050, 1052, 9999]) {
+    useWeb({ reuseChat: false });
+    genQueue = [{ ok: true, text: '', failure: `site said ${code}`, code }];
+    res = await ctx.ask(mcq());
+    check(`code ${code} is not: asking again would be refused again`, !!res.error && res.rateLimited === undefined, j(res.rateLimited));
+  }
+  useWeb({ reuseChat: false });
+  genQueue = [{ ok: false, status: 429, detail: 'slow down' }];
+  res = await ctx.ask(mcq());
+  check('a plain HTTP 429 from the Gemini site is waited out too', res.rateLimited === true && res.limitNote === 'the Gemini site is limiting this account', j(res.limitNote));
+  useWeb({ reuseChat: false });
+  genQueue = [{ ok: false, status: 401, detail: 'not signed in' }];
+  res = await ctx.ask(mcq());
+  check('a refused session is not', !!res.error && res.rateLimited === undefined);
+
+  useWeb({ geminiWebChat: webOld() });
+  genQueue = [{ ok: true, text: '', failure: 'site said 1095', code: 1095 }];
+  res = await ctx.ask(mcq());
+  check('1095 on a continued conversation is not blamed on the conversation: no new one is started',
+    gens().length === 1 && res.rateLimited === true && store.geminiWebChat.cid === 'c_old', j({ n: gens().length, chat: store.geminiWebChat?.cid }));
+
+  // The other services: a 429 is a wait on each, unless the money has run out.
+  store = { apiKey: 'sk-or-v1-abc', model: 'a/one', fallbackModel: 'b/two' };
+  script(limitRes(429, 'busy'), limitRes(429, 'busy'));
+  res = await ctx.ask(mcq());
+  check('OpenRouter turning both models away is flagged', res.rateLimited === true && /OpenRouter is rate-limiting/.test(res.limitNote), j(res.limitNote));
+  script(limitRes(429, 'busy'), orGood('{"answer":"B","index":1}'));
+  res = await ctx.ask(mcq());
+  check('but one that answers on the fallback model is simply an answer, not a wait', res.index === 1 && res.rateLimited === undefined, j(res));
+  script(limitRes(500, 'broken'), limitRes(500, 'broken'));
+  res = await ctx.ask(mcq());
+  check('a server error is not a rate limit', !!res.error && res.rateLimited === undefined);
+  store = { provider: 'openai', openaiKey: 'sk-test-OPENAI-FAKE-KEY-123' };
+  script(limitRes(429, '{"error":{"code":"rate_limit_exceeded"}}'));
+  res = await ctx.ask(mcq());
+  check('OpenAI asking for patience is flagged', res.rateLimited === true && /OpenAI is rate-limiting/.test(res.limitNote), j(res.limitNote));
+  script(limitRes(429, '{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}'));
+  res = await ctx.ask(mcq());
+  check('OpenAI saying the money has run out is not: waiting does not cure that', !!res.error && res.rateLimited === undefined, j(res.rateLimited));
+  useGemini();
+  script(limitRes(429, '{"error":{"status":"RESOURCE_EXHAUSTED"}}'));
+  res = await ctx.ask(mcq());
+  check('the Gemini key service is flagged too', res.rateLimited === true && /Gemini is rate-limiting/.test(res.limitNote), j(res.limitNote));
+
+  check('Retry-After: nothing, or a response with no headers, is zero', ctx.retryAfterOf(null) === 0 && ctx.retryAfterOf({}) === 0 && ctx.retryAfterOf(limitRes(429)) === 0);
+  check('seconds are read as milliseconds', ctx.retryAfterOf(limitRes(429, '', '12')) === 12000);
+  check('garbage is zero, not NaN', ctx.retryAfterOf(limitRes(429, '', 'soon')) === 0);
+  check('a date already past is zero', ctx.retryAfterOf(limitRes(429, '', 'Wed, 01 Jan 2020 00:00:00 GMT')) === 0);
+
+  /* ---------------------------------------------------- "Lessons per run" went from 5 to 100 */
+  console.log('\nLessons per run: the old default of 5 becomes 100, once');
+  store = { maxLessons: 5 };
+  await ctx.migrateSettings();
+  check('a stored 5 is the old default saved by Options, and becomes 100', store.maxLessons === 100 && store.lessonsDefault100 === true, j(store));
+  store.maxLessons = 5;
+  await ctx.migrateSettings();
+  check('but only once: a 5 chosen afterwards is left alone', store.maxLessons === 5, j(store));
+  store = { maxLessons: 12 };
+  await ctx.migrateSettings();
+  check('any other number the person chose is kept', store.maxLessons === 12 && store.lessonsDefault100 === true, j(store));
+  store = {};
+  await ctx.migrateSettings();
+  check('with nothing stored there is nothing to change, and the default (100) applies', store.maxLessons === undefined && store.lessonsDefault100 === true, j(store));
+  store = { maxLessons: 100 };
+  await ctx.migrateSettings();
+  check('a stored 100 is untouched', store.maxLessons === 100);
+
   console.log('\nOpenRouter and the others are unchanged by any of this');
   store = { apiKey: 'sk-or-v1-abc' };
   calls = script(orGood('{"answer":"B","index":1}'));

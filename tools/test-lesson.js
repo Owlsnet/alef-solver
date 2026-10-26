@@ -247,6 +247,67 @@ const chromeExe = [
   check('a fresh report was saved, naming the stage and what the page looked like', /stage:\s+no-next/.test(noNextReport) && /answered, but there is no Next button/.test(noNextReport) && /=== alef-solver dump ===/.test(noNextReport), noNextReport.slice(0, 160).replace(/\n/g, ' | '));
   check('and the status line points at it', /Copy last report|Developer mode/.test(await s.eval(`(document.getElementById('alef-solver-hud') || {}).textContent || ''`)));
 
+  /* ------------------------------------------------------------------ a rate limit mid-lesson */
+  // A service saying it is limiting the account is not a failure to end the run on: wait for it to
+  // clear, with the time left on the status line, and ask the same question again. Stop still works.
+  const limitedStub = (script) => `
+    window.__asked = []; window.__scripted = [1,2,0]; window.__stored = null; window.__huds = []; window.__calls = 0;
+    ${script}
+    new MutationObserver(recs => { for (const r of recs) for (const n of r.addedNodes) if (n.nodeType === 3 && /^alef · /.test(n.textContent)) window.__huds.push(n.textContent); })
+      .observe(document.documentElement, { subtree: true, childList: true });
+    window.chrome = { runtime: { sendMessage: (m) => {
+      if (m && m.type === 'ask') {
+        window.__calls++;
+        const turned = window.__turnAway && window.__turnAway(window.__asked.length);
+        if (turned) return Promise.resolve(turned);
+        window.__asked.push(m.payload);
+        const i = window.__asked.length - 1;
+        return Promise.resolve({ index: window.__scripted[i] ?? 0, confidence: 0.9 }); }
+      return Promise.resolve({ error: 'unstubbed' }); }, onMessage: { addListener(){} } },
+      storage: { local: { get: (k, cb) => cb ? cb({}) : Promise.resolve({}), set: (o) => { window.__stored = Object.assign(window.__stored || {}, o); return Promise.resolve(); } }, onChanged: { addListener(){} } } };
+    'ok'`;
+  const until = async (fn, ms = 20000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await fn()) return true; await new Promise(r => setTimeout(r, 100)); } return false; };
+
+  console.log('\na rate limit in the middle of a lesson is waited out');
+  await s.goto(url);
+  await s.eval(limitedStub(`
+    let left = 2;                                   // the second question is turned away twice first
+    window.__turnAway = (answered) => (answered === 1 && left-- > 0)
+      ? { error: 'the Gemini site is limiting this account (HTTP 429)', rateLimited: true, retryAfterMs: 40, limitNote: 'the Gemini site is limiting this account (error 1095)' }
+      : null;`));
+  await s.eval(CONTENT_JS, { awaitPromise: false });
+  await s.eval(`window.__alefSolver.solveLesson()`, { awaitPromise: false });
+  await until(async () => (await s.eval(`window.__lessonSubmissions.length`)) >= 3 && (await s.eval(`!window.__alefSolverRunning`)));
+  check('the run carried on past it and answered all three questions', (await s.eval(`JSON.stringify(window.__lessonSubmissions)`)) === '[1,2,0]', await s.eval(`JSON.stringify(window.__lessonSubmissions)`));
+  check('the turned-away question was asked three times in all: twice refused, then answered', (await s.eval(`window.__calls`)) === 5 && (await s.eval(`window.__asked.length`)) === 3, `calls=${await s.eval(`window.__calls`)}`);
+  const hudsA = await s.eval(`JSON.stringify(window.__huds)`);
+  check('the status line counted the wait down, naming the reason', /⏳ the Gemini site is limiting this account \(error 1095\) — trying again in 0:\d\d \(Stop cancels\)/.test(hudsA), hudsA.slice(0, 200));
+  check('and no failure report was saved for it', !(await s.eval(`!!(window.__stored && window.__stored.lastReport)`)));
+
+  console.log('\nStop during the wait ends the run quietly');
+  await s.goto(url);
+  await s.eval(limitedStub(`window.__turnAway = () => ({ error: 'limited', rateLimited: true, limitNote: 'DeepSeek is rate-limiting this account' });`));
+  await s.eval(CONTENT_JS, { awaitPromise: false });
+  await s.eval(`window.__alefSolver.solveLesson()`, { awaitPromise: false });
+  const counting = await until(async () => /⏳ DeepSeek is rate-limiting this account — trying again in 0:1[45]/.test(await s.eval(`JSON.stringify(window.__huds)`)), 8000);
+  check('with no Retry-After it starts at the first wait of the schedule, fifteen seconds', counting, (await s.eval(`JSON.stringify(window.__huds)`)).slice(0, 160));
+  const tStop = Date.now();
+  await s.eval(`window.__alefSolver.stop(); 'ok'`);
+  const ended = await until(async () => await s.eval(`!window.__alefSolverRunning`), 6000);
+  check('Stop ends it within a couple of seconds, not at the end of the wait', ended && Date.now() - tStop < 4000, `${Date.now() - tStop}ms`);
+  check('it had asked once, and nothing was submitted', (await s.eval(`window.__calls`)) === 1 && (await s.eval(`window.__lessonSubmissions.length`)) === 0);
+  check('no failure report was saved: a Stop is not a failure', !(await s.eval(`!!(window.__stored && window.__stored.lastReport)`)));
+  check('and the status line says it was stopped', /stopped/i.test(await s.eval(`JSON.stringify(window.__huds.slice(-3))`)), await s.eval(`JSON.stringify(window.__huds.slice(-3))`));
+
+  console.log('\nany other error still ends the run with a report');
+  await s.goto(url);
+  await s.eval(limitedStub(`window.__turnAway = () => ({ error: 'the account\\'s default model: HTTP 500 boom' });`));
+  await s.eval(CONTENT_JS, { awaitPromise: false });
+  await s.eval(`window.__alefSolver.solveLesson()`, { awaitPromise: false });
+  await until(async () => await s.eval(`!!(window.__stored && window.__stored.lastReport)`), 8000);
+  check('a failure that is not a rate limit is not waited out', (await s.eval(`window.__calls`)) === 1, `calls=${await s.eval(`window.__calls`)}`);
+  check('and it leaves its report, naming the stage', /stage:\s+answer/.test(await s.eval(`String((window.__stored || {}).lastReport || '')`)));
+
   s.close();
   console.log(`\n${fail === 0 ? '✓ all' : '✗'} ${pass} passed, ${fail} failed\n`);
   cleanup();

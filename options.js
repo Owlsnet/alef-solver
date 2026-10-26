@@ -149,7 +149,7 @@ async function load() {
   document.getElementById('answerDelay').value = s.answerDelay ?? 120;
   document.getElementById('stepDelay').value = s.stepDelay ?? 250;
   document.getElementById('retries').value = s.retries ?? 3;
-  document.getElementById('maxLessons').value = s.maxLessons ?? 5;
+  document.getElementById('maxLessons').value = s.maxLessons ?? 100;
   document.getElementById('devMode').checked = s.devMode === true;
   renderSpeed();
 }
@@ -285,7 +285,7 @@ function read() {
     answerDelay: num('answerDelay', 3000),
     stepDelay: num('stepDelay', 5000),
     retries: num('retries', 10),
-    maxLessons: Math.max(1, num('maxLessons', 50)),
+    maxLessons: Math.max(1, num('maxLessons', 500)),
     devMode: document.getElementById('devMode').checked,
     hotkeys: clone(hotkeys),
   };

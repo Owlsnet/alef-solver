@@ -569,6 +569,9 @@ const GW_ERRORS = {
   1050: 'the model no longer matches this conversation — start a fresh one',
   1052: 'the site would not accept the model header — the model list needs refreshing',
   1060: 'the site has temporarily blocked this network address',
+  // In neither reference client nor any documentation found. It came back on the first question of
+  // a run, with the site otherwise answering, so it is worded as "not now" and waited out.
+  1095: 'the site is turning this account away for now (error 1095, not a documented code; treated as a rate limit)',
 };
 
 chrome.runtime.onMessage.addListener((msg, _sender, respond) => {

@@ -50,6 +50,19 @@ async function settings() {
   return out;
 }
 
+/** "Lessons per run" used to default to 5 and now defaults to 100. Options saves every box it
+ *  shows, so anyone who ever pressed Save has the old default stored as if they had chosen it, and
+ *  a new default alone would never reach them. Once, a stored 5 is taken for the old default and
+ *  replaced; whatever is chosen after that is left alone, 5 included. */
+async function migrateSettings() {
+  try {
+    const s = await chrome.storage.local.get(['maxLessons', 'lessonsDefault100']);
+    if (s.lessonsDefault100) return;
+    await chrome.storage.local.set(s.maxLessons === 5 ? { maxLessons: 100, lessonsDefault100: true } : { lessonsDefault100: true });
+  } catch { /* tried again the next time the worker starts */ }
+}
+migrateSettings();
+
 /* ------------------------------------------------------------- keeping one chat */
 
 /* The two sites that have chats of their own (DeepSeek and the Gemini site) list every
@@ -1019,9 +1032,17 @@ async function gwUpload(dataUrl, pushId) {
 function gwChatLost(out) {
   if (!out) return false;
   if (!out.ok) return ![401, 403, 429].includes(out.status);
-  if (out.failure) return ![1037, 1013, 1060].includes(out.code);
+  if (out.failure) return !GW_RETRY_CODES.includes(out.code);
   return !out.text;
 }
+
+/** The Gemini site's codes that mean "not now" rather than "not you": the allowance is used up
+ *  (1037), a temporary error (1013), the network address is blocked for a while (1060), and 1095.
+ *  1095 is in neither reference client and in no documentation found; it came back on the first
+ *  question of a run, with the site otherwise answering, and is treated as the same kind of thing.
+ *  These are waited out and asked again (see askCore). Anything else — a model that no longer
+ *  matches, a refusal — is not a wait, and asking again would only be refused again. */
+const GW_RETRY_CODES = [1013, 1037, 1060, 1095];
 
 /* ------------------------------------------- the Gemini session, kept between questions */
 
@@ -1212,7 +1233,9 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
       error: { message: out.detail || 'the Gemini page refused the request' } }) };
   }
   if (out.failure) {
-    return { ok: false, status: 429, text: async () => JSON.stringify({ error: { message: out.failure } }) };
+    // `retryable` and `code` ride along for askCore: a code that means "not now" is waited out.
+    return { ok: false, status: 429, code: out.code, retryable: GW_RETRY_CODES.includes(out.code),
+             text: async () => JSON.stringify({ error: { message: out.failure } }) };
   }
 
   if (reuse && out.text && out.cid && out.rid && out.rcid) {
@@ -1492,6 +1515,13 @@ async function askCore(payload) {
   let body = buildBody(cfg, sent);
   let imageDropped = deepseek && !!(payload.image || payload.images?.length);
   const errors = [];
+  // A rate limit is a wait, not a failure. When any try is turned away for asking too much, that is
+  // remembered here — `limit` is { note, retryAfterMs } — and the answer says so, so the page can
+  // wait and ask again instead of ending the run.
+  let limit = null;
+  const limited = (note, res) => {
+    limit = { note, retryAfterMs: Math.max(limit?.retryAfterMs || 0, retryAfterOf(res)) };
+  };
   const hasImages = b => b.messages[1].content.some(c => c.type === 'image_url');
   const blind = new Set();       // models that said they cannot read a picture
 
@@ -1585,6 +1615,7 @@ async function askCore(payload) {
 
       // The site throttles by account, not by model: a second model would be refused too.
       if (deepseek && res.status === 429) {
+        limited('DeepSeek is rate-limiting this account', res);
         return { error: `${named}: DeepSeek is rate-limiting this account (HTTP 429) — wait a moment and try again. ${detail.slice(0, 120)}`, then: 'stop' };
       }
 
@@ -1594,6 +1625,8 @@ async function askCore(payload) {
         return { error: `${named}: gemini.google.com would not accept the session (HTTP ${res.status}) — open the site, sign in, and reload the tab. ${detail.slice(0, 140)}`, then: 'stop' };
       }
       if (gweb && res.status === 429) {
+        // Only a code that means "not now" is waited out; any other failure the page reports as it did.
+        if (res.retryable !== false) limited(`the Gemini site is limiting this account${res.code ? ` (error ${res.code})` : ''}`, res);
         return { error: `${named}: the Gemini site is limiting this account (HTTP 429) — wait a while and try again, or pick another service. ${detail.slice(0, 140)}`, then: 'stop' };
       }
 
@@ -1635,6 +1668,11 @@ async function askCore(payload) {
         body = rebuilt({ image: null, images: [] });
         imageDropped = true;
         return attempt(model, structured);
+      }
+      // A plain 429 from any other service is a wait too — unless OpenAI says the account's money has
+      // run out (insufficient_quota), which waiting does not cure.
+      if (res.status === 429 && !(openai && /insufficient_quota/i.test(detail))) {
+        limited(`${gemini ? 'Gemini' : openai ? 'OpenAI' : 'OpenRouter'} is rate-limiting this account`, res);
       }
       return {
         error: `${named}${structured ? ' [json]' : ''}: HTTP ${res.status} ${detail}`,
@@ -1719,7 +1757,21 @@ async function askCore(payload) {
   }
 
   if (got && got !== 'stop') return got;
-  return { error: errors.join(' | ') || 'unknown failure' };
+  return {
+    error: errors.join(' | ') || 'unknown failure',
+    ...(limit ? { rateLimited: true, retryAfterMs: limit.retryAfterMs, limitNote: limit.note } : {}),
+  };
+}
+
+/** How long a service said to wait before asking again (Retry-After: seconds, or a date), in
+ *  milliseconds; 0 when it did not say, or when there was no response to ask. */
+function retryAfterOf(res) {
+  const v = res?.headers?.get?.('retry-after');
+  if (v == null || v === '') return 0;
+  const secs = Number(v);
+  if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+  const at = Date.parse(v);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : 0;
 }
 
 /** Options' "Test key": ask for a challenge and answer it, without asking the model anything. */

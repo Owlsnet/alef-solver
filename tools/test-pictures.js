@@ -256,6 +256,71 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       Number.isFinite(t.ask?.payload?.shotMs) && (expectCapture || t.ask.payload.shotMs === 0), JSON.stringify(t.ask?.payload?.shotMs));
   }
 
+  // ------------------------------------------------------------------------------------------------
+  // A service saying it is limiting the account is a wait, not a failure: the question is asked
+  // again when the limit clears, with the time left on the status line, until Stop is pressed.
+  console.log('\n=== waiting out a rate limit: how long ===');
+  await load('');
+  for (const [tries, said, want, why] of [
+    [0, 0, 15000, 'the first wait is fifteen seconds'],
+    [1, 0, 30000, 'then thirty'],
+    [2, 0, 60000, 'then a minute'],
+    [3, 0, 120000, 'then two'],
+    [4, 0, 180000, 'then three'],
+    [5, 0, 300000, 'then five minutes'],
+    [9, 0, 300000, 'and five minutes from then on, so a long limit is asked about, not hammered'],
+    [-1, 0, 15000, 'a nonsense count is taken for the first'],
+    [0, 40, 40, 'the service\'s own Retry-After is used when it gives one, even a short one'],
+    [5, 7000, 7000, '... whatever the count'],
+    [0, 20 * 60 * 1000, 600000, 'but never more than ten minutes'],
+    ['0', 'junk', 15000, 'and junk is ignored'],
+  ]) {
+    check(why, await J(`window.__alefSolver.rateWaitMs(${JSON.stringify(tries)}, ${JSON.stringify(said)})`) === want, `tries=${tries} said=${said}`);
+  }
+
+  console.log('\n=== waiting out a rate limit: asking again ===');
+  const limited = (over = {}) => ({ error: 'limited (HTTP 429)', rateLimited: true, retryAfterMs: 40, limitNote: 'the Gemini site is limiting this account (error 1095)', ...over });
+  const good = { index: 1, letter: 'B', confidence: 0.9, why: 'x' };
+  const withReplies = async replies => {
+    await load('');
+    await s.eval(`
+      window.__huds = []; window.__replies = ${JSON.stringify(replies)}; window.__asks = 0;
+      new MutationObserver(recs => { for (const r of recs) for (const n of r.addedNodes) if (n.nodeType === 3 && /^alef · /.test(n.textContent)) window.__huds.push(n.textContent); })
+        .observe(document.documentElement, { subtree: true, childList: true });
+      window.chrome.runtime.sendMessage = m => {
+        if (!(m && m.type === 'ask')) return Promise.resolve({ error: 'no capture in tests' });
+        return Promise.resolve(window.__replies[Math.min(window.__asks++, window.__replies.length - 1)]);
+      };
+      'ok'`, { awaitPromise: false });
+  };
+  const until = async (fn, ms = 8000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await fn()) return true; await sleep(100); } return false; };
+
+  await withReplies([limited(), limited(), good]);
+  let rl = await J(`window.__alefSolver.solveOne(true)`);
+  check('turned away twice, it asks a third time and the question is answered and submitted', rl.ok === true && rl.commit.submitted === true && (await J(`window.__asks`)) === 3, JSON.stringify({ ok: rl.ok, asks: await J(`window.__asks`), why: rl.reason }));
+  let huds = JSON.stringify(await J(`window.__huds`));
+  check('meanwhile the status line counted down, naming the reason, and said Stop cancels', /⏳ the Gemini site is limiting this account \(error 1095\) — trying again in 0:\d\d \(Stop cancels\)/.test(huds), huds.slice(0, 220));
+  check('and the answer line is for the try that worked', /→ B · \d+ms/.test(huds));
+
+  await withReplies([{ error: 'the account\'s default model: HTTP 500 boom' }]);
+  rl = await J(`window.__alefSolver.solveOne(true)`);
+  check('any other error still ends the question at once, as it did', rl.ok === false && rl.reason === 'api' && (await J(`window.__asks`)) === 1, JSON.stringify({ reason: rl.reason, asks: await J(`window.__asks`) }));
+
+  await withReplies([limited({ retryAfterMs: 0, limitNote: 'DeepSeek is rate-limiting this account' })]);
+  await s.eval(`window.__run = window.__alefSolver.solveOne(true); 'ok'`, { awaitPromise: false });
+  check('with no Retry-After the wait is the schedule\'s fifteen seconds', await until(async () => /trying again in 0:1[45]/.test(JSON.stringify(await J(`window.__huds`)))));
+  const tStop = Date.now();
+  await s.eval(`window.__alefSolver.stop(); 'ok'`);
+  rl = await J(`window.__run`);
+  check('Stop ends the wait within a couple of seconds, and the question is reported stopped, not failed', rl.ok === false && rl.stopped === true && Date.now() - tStop < 4000, `${Date.now() - tStop}ms ${JSON.stringify({ ok: rl.ok, reason: rl.reason })}`);
+  check('it had asked only once, and nothing was submitted', (await J(`window.__asks`)) === 1 && (await J(`window.__graded`)) === false);
+
+  // Stop pressed while nothing was running used to stay pressed; the next single-question solve must not be cancelled by it.
+  await withReplies([limited(), good]);
+  await s.eval(`window.__alefSolver.stop(); 'ok'`);
+  await s.eval(`(async () => { await window.__alefSolver.solve(); return 'done'; })()`);
+  check('a Stop pressed earlier, with nothing running, does not cancel the next question\'s wait', (await J(`window.__asks`)) === 2 && (await J(`window.__graded`)) === true, JSON.stringify({ asks: await J(`window.__asks`), graded: await J(`window.__graded`) }));
+
   s.close();
   console.log(`\n${fail === 0 ? '✓ all' : '✗'} ${pass} passed, ${fail} failed\n`);
   cleanup();

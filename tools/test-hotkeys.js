@@ -292,13 +292,16 @@ const CONTENT_STUB = `
 
   console.log('\n=== Options: lessons per run ===');
   const lessonsBox = () => s.eval(`document.getElementById('maxLessons').value`);
-  check('defaults to 5', (await lessonsBox()) === '5', JSON.stringify(await lessonsBox()));
+  check('defaults to 100', (await lessonsBox()) === '100', JSON.stringify(await lessonsBox()));
   await s.eval(`document.getElementById('maxLessons').value = '12'; 'ok'`, { awaitPromise: false });
   check('a number is saved as a number', (await save(), await s.eval(`window.__store.maxLessons`)) === 12);
   await s.eval(`document.getElementById('maxLessons').value = '0'; 'ok'`, { awaitPromise: false });
   check('zero is raised to one lesson', (await save(), await s.eval(`window.__store.maxLessons`)) === 1);
   await s.eval(`document.getElementById('maxLessons').value = '999'; 'ok'`, { awaitPromise: false });
-  check('and a huge number is capped at 50', (await save(), await s.eval(`window.__store.maxLessons`)) === 50);
+  check('and a huge number is capped at 500', (await save(), await s.eval(`window.__store.maxLessons`)) === 500);
+  await s.eval(`document.getElementById('maxLessons').value = '100'; 'ok'`, { awaitPromise: false });
+  check('100 is allowed as it is', (await save(), await s.eval(`window.__store.maxLessons`)) === 100);
+  check('and the box itself allows up to 500', (await s.eval(`document.getElementById('maxLessons').max`)) === '500');
   await openOptions({ maxLessons: 8 });
   check('reopening shows what was saved', (await lessonsBox()) === '8', JSON.stringify(await lessonsBox()));
   await openOptions({ hotkeys: saved });

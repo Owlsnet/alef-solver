@@ -27,7 +27,7 @@
     devMode: false,       // shows Dump / Copy last report; set in Options
     hotkeys: null,        // shortcuts set in Options; an action it does not name keeps its default
     autoNextLesson: false, // after the last question: press Done and go on to the next lesson
-    maxLessons: 5,        // lessons per run when autoNextLesson is on
+    maxLessons: 100,      // lessons per run when autoNextLesson is on
     slideWaitMs: 45000,   // how long to wait for a greyed-out Next on a slide to unlock (not in Options)
     skipLater: true,      // a question that offers "I'll try later" is skipped with it, not answered
   };
@@ -2769,6 +2769,51 @@
     });
   }
 
+  /** How long to wait, in seconds, before asking again after the 1st, 2nd, 3rd... time a service
+   *  said it was limiting the account. The last one repeats, so a limit that lasts is asked about
+   *  every five minutes rather than never, or every few seconds. */
+  const RATE_WAITS = [15, 30, 60, 120, 180, 300];
+
+  /** The wait, in milliseconds, before the (tries+1)th ask after a rate limit: the service's own
+   *  Retry-After when it gave one (but never more than ten minutes), otherwise the schedule. */
+  function rateWaitMs(tries, retryAfterMs) {
+    const said = Number(retryAfterMs) || 0;
+    if (said > 0) return Math.min(said, 10 * 60 * 1000);
+    return RATE_WAITS[Math.min(Math.max(0, tries), RATE_WAITS.length - 1)] * 1000;
+  }
+
+  /** Wait `ms`, with the time left on the status line, ending early if Stop is pressed.
+   *  Resolves false when it was stopped. */
+  async function waitWithCountdown(ms, why) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (stopRun) return false;
+      const left = Math.ceil((end - Date.now()) / 1000);
+      hud(`⏳ ${why} — trying again in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} (Stop cancels)`, true);
+      await sleep(Math.min(1000, Math.max(0, end - Date.now())));
+    }
+    return !stopRun;
+  }
+
+  /** Ask the model, and when the answer is "the service is limiting this account", wait for it to
+   *  stop and ask the same question again — as many times as it takes — instead of ending the
+   *  run on it. The wait is the service's own Retry-After when it gave one, otherwise RATE_WAITS.
+   *  Resolves { ans, ms } (ms being the last try's time, not the waiting), or { stopped: true }
+   *  when Stop was pressed during a wait. */
+  async function askPatiently(message) {
+    for (let tries = 0; ; tries++) {
+      const t0 = performance.now();
+      const ans = await chrome.runtime.sendMessage(message);
+      const ms = Math.round(performance.now() - t0);
+      if (!ans || !ans.rateLimited) return { ans, ms };
+      if (stopRun) return { stopped: true };
+
+      const wait = rateWaitMs(tries, ans.retryAfterMs);
+      console.warn('[alef-solver] rate limited:', ans.limitNote || ans.error);
+      if (!(await waitWithCountdown(wait, ans.limitNote || 'rate limited'))) return { stopped: true };
+    }
+  }
+
   /** Solve one question. Returns a result the run loop can act on. `tried` is
    *  every answer the page has already marked wrong; the result's `attempt` says
    *  what was answered this time, so the caller can add it to that list. */
@@ -2821,8 +2866,7 @@
     }
 
     say('asking ai…');
-    const t0 = performance.now();
-    const ans = await chrome.runtime.sendMessage({
+    const { ans, ms, stopped } = await askPatiently({
       type: 'ask',
       payload: {
         kind: p.kind,
@@ -2857,7 +2901,10 @@
         shotMs,                     // how long the capture took, for the timing log
       },
     });
-    const ms = Math.round(performance.now() - t0);
+    if (stopped) {
+      hud('stopped while waiting for the rate limit to clear');
+      return { ok: false, reason: 'stopped', stopped: true };
+    }
     // No model on the list could read the picture, so this answer is a guess from the words.
     const blind = ans?.imageDropped ? ' · ⚠ could not see the picture' : '';
     const speedNote = speedNoteOf(ans?.timing, shotMs);
@@ -3054,6 +3101,7 @@
   async function solve() {
     if (busy) return hud('already running');
     busy = true;
+    stopRun = false;               // a Stop pressed while nothing was running must not cancel this
     try {
       await loadSettings();
       // A question of a type this cannot read: skip it all the same, if it offers that.
@@ -3072,6 +3120,7 @@
       if (a.skipped) hud('skipped: the page offers "I\'ll try later", so I pressed it instead of answering', true);
       else if (a.wrong) await giveUpOnWrong(0, a);
       else if (a.stuck) await failRun(0, 'retry', a.stuck, { tried: a.tried });
+      else if (r.stopped) { /* Stop was pressed while waiting out a rate limit; already said */ }
       else if (!r.ok) await failRun(0, 'answer', r.reason || r.error || 'could not answer', r);
       else if (CFG.autoSubmit && !c.submitted) await failRun(0, 'submit', c.error || 'submit did not register', c);
     } catch (e) {
@@ -3080,6 +3129,7 @@
       await failRun(0, 'exception', String(e.message || e), { stack: String(e.stack || '').slice(0, 600) });
     } finally {
       busy = false;
+      stopRun = false;
     }
   }
 
@@ -3376,6 +3426,7 @@
           // "no Next button", which would read as a lesson that finished.
           if (a.wrong) { await giveUpOnWrong(n, a); break; }
           if (a.stuck) { await failRun(n, 'retry', a.stuck, { tried: a.tried }); break; }
+          if (r.stopped) break;                     // Stop was pressed while waiting out a rate limit; already said
           if (!r.ok) {
             await failRun(n, 'answer', r.reason || 'could not answer', r);
             break;
@@ -4138,7 +4189,7 @@
   window.__alefSolver = {
     scrape, commit, commitMulti, commitCloze, commitDropdown, readDropdownOptions, commitMatch, commitDrag,
     report, solve, solveOne, solveLesson,
-    dump, screenshot, wantsScreenshot, selected, findButton,
+    dump, screenshot, wantsScreenshot, rateWaitMs, selected, findButton,
     findSubmit: (root) => findButton('submit', root),
     findCloze, findWordBank, setInputValue,
     forgetPassage, lessonKey, isGraded, contentScreen, commitSort, feedbackForm, feedbackSubmit, stop: () => { stopRun = true; },
