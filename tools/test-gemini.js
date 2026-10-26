@@ -25,6 +25,10 @@ const ctx = vm.createContext({
   },
 });
 vm.runInContext(SRC, ctx, { filename: 'background.js' });
+// A service worker has timers; the sandbox does not. Waits are recorded and then skipped, so the
+// schedule can be checked without sitting through it.
+const pauses = [];
+ctx.setTimeout = (fn, ms) => { pauses.push(ms); return setTimeout(fn, 0); };
 
 let pass = 0, fail = 0;
 const check = (name, ok, detail = '') => {
@@ -1013,6 +1017,68 @@ const useGemini = (extra = {}) => { store = { provider: 'gemini', geminiKey: KEY
   check('seconds are read as milliseconds', ctx.retryAfterOf(limitRes(429, '', '12')) === 12000);
   check('garbage is zero, not NaN', ctx.retryAfterOf(limitRes(429, '', 'soon')) === 0);
   check('a date already past is zero', ctx.retryAfterOf(limitRes(429, '', 'Wed, 01 Jan 2020 00:00:00 GMT')) === 0);
+
+  /* ------------------------------------- the site's own error message comes back as the reply */
+  console.log('\nThe Gemini site\'s own error message is not an answer');
+  const OWN_ERROR = 'I seem to be encountering an error. Can I try something else for you?';
+  const errorReply = (cid = 'c_err') => ({ ok: true, text: OWN_ERROR, done: true, cid, rid: 'r_err', rcid: 'rc_err' });
+
+  for (const [text, want, why] of [
+    [OWN_ERROR, true, 'the message from the failure report'],
+    ['  I seem to be encountering an error.  ', true, 'with spaces round it'],
+    ['Something went wrong. Please try again.', true, 'the plain "something went wrong"'],
+    ['', false, 'an empty reply is another case, not this one'],
+    ['{"answer":"B","index":1}', false, 'an answer'],
+    ['{"answer":"C","why":"something went wrong with option B"}', false, 'an answer that happens to say so in its reason'],
+    ['[2,0]', false, 'a list of picks'],
+    ['There is no error in option A.', false, 'prose that merely mentions an error'],
+    ['x'.repeat(500) + ' encountering an error', false, 'long text is never the short fallback message'],
+  ]) {
+    check(`${why}: ${want ? 'recognised' : 'left alone'}`, ctx.gwErrorReply(text) === want, text.slice(0, 40));
+  }
+
+  useWeb({ reuseChat: false });
+  genQueue = [errorReply()];
+  pauses.length = 0;
+  res = await ctx.ask(mcq());
+  check('asked again, and the question is answered', res.index === 1 && !res.error && gens().length === 2, j({ n: gens().length, e: res.error }));
+  check('after a short wait', j(pauses) === j([2000]), j(pauses));
+  check('with a fresh session: the page and the model list were asked for again', count('gw-init') === 2 && count('gw-models') === 2, j({ init: count('gw-init'), models: count('gw-models') }));
+
+  useWeb();
+  await ctx.ask(mcq());                                // the session is now kept
+  genQueue = [errorReply()];
+  tabLog = [];
+  res = await ctx.ask(mcq());
+  check('even a kept session is fetched again for the retry', res.index === 1 && count('gw-init') === 1 && count('gw-models') === 1, j({ init: count('gw-init'), e: res.error }));
+
+  useWeb({ geminiWebChat: webOld() });
+  genQueue = [errorReply('c_old')];
+  res = await ctx.ask(mcq());
+  check('a continued conversation that says this is not gone on with: the retry is in a new one',
+    j(gens()[0].chat) === j(['c_old', 'r_old', 'rc_old']) && gens()[1].chat === null && res.index === 1, j(gens().map(g => g.chat)));
+  check('and what is kept is the new conversation, never the one that errored',
+    store.geminiWebChat.cid === 'c_1' && store.geminiWebChat.rid === 'r_1' && store.geminiWebChat.turns === 1, j(store.geminiWebChat));
+
+  useWeb({ reuseChat: false });
+  genQueue = [errorReply(), errorReply()];
+  pauses.length = 0;
+  res = await ctx.ask(mcq());
+  check('twice, then an answer: three tries in all, waiting two seconds and then six', res.index === 1 && gens().length === 3 && j(pauses) === j([2000, 6000]), j({ n: gens().length, pauses }));
+
+  useWeb({ geminiWebChat: webOld() });
+  genQueue = [errorReply(), errorReply(), errorReply()];
+  pauses.length = 0;
+  res = await ctx.ask(mcq());
+  check('three times in all it is not answered, and says why', !!res.error && gens().length === 3 && /own error message/.test(res.error) && /encountering an error/.test(res.error), (res.error || '').slice(0, 160));
+  check('it is flagged as a wait that has an end, four long', res.rateLimited === true && res.retryLimit === 4 && /own error message/.test(res.limitNote || ''), j({ r: res.rateLimited, l: res.retryLimit, n: res.limitNote }));
+  check('and no conversation is kept from it', !store.geminiWebChat, j(store.geminiWebChat));
+
+  useWeb({ reuseChat: false });
+  genQueue = [{ ok: true, text: '{"answer":"B","index":1,"why":"something went wrong with C"}', done: true, cid: 'c_1', rid: 'r_1', rcid: 'rc_1' }];
+  pauses.length = 0;
+  res = await ctx.ask(mcq());
+  check('an answer that merely says so is an answer: no retry, no wait', res.index === 1 && gens().length === 1 && pauses.length === 0, j({ n: gens().length, pauses }));
 
   /* ---------------------------------------------------- "Lessons per run" went from 5 to 100 */
   console.log('\nLessons per run: the old default of 5 becomes 100, once');

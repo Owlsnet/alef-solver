@@ -315,6 +315,18 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   check('Stop ends the wait within a couple of seconds, and the question is reported stopped, not failed', rl.ok === false && rl.stopped === true && Date.now() - tStop < 4000, `${Date.now() - tStop}ms ${JSON.stringify({ ok: rl.ok, reason: rl.reason })}`);
   check('it had asked only once, and nothing was submitted', (await J(`window.__asks`)) === 1 && (await J(`window.__graded`)) === false);
 
+  // Most waits go on for as long as it takes; one that comes with a number (the site's own error message
+  // is given four) ends there, and the failure stands — a question it keeps failing on must not hold a run up for good.
+  await withReplies([limited({ retryLimit: 2, limitNote: 'the Gemini site answered with its own error message', error: 'the Gemini site answered with its own error message: "I seem to be encountering an error."' })]);
+  rl = await J(`window.__alefSolver.solveOne(true)`);
+  check('a wait with an end of two: asked three times in all, then the failure stands', rl.ok === false && rl.reason === 'api' && (await J(`window.__asks`)) === 3, JSON.stringify({ ok: rl.ok, reason: rl.reason, asks: await J(`window.__asks`) }));
+  huds = await J(`window.__huds`);
+  check('it counted down for each of the two waits, naming the reason', huds.filter(t => /⏳ the Gemini site answered with its own error message — trying again/.test(t)).length === 2, JSON.stringify(huds).slice(0, 200));
+  check('and it ends by showing the error, not another countdown', /✗ the Gemini site answered with its own error message/.test(huds[huds.length - 1]), huds[huds.length - 1]);
+  await withReplies([limited({ retryLimit: 0 })]);
+  rl = await J(`window.__alefSolver.solveOne(true)`);
+  check('a limit of none is not waited on at all', rl.ok === false && (await J(`window.__asks`)) === 1);
+
   // Stop pressed while nothing was running used to stay pressed; the next single-question solve must not be cancelled by it.
   await withReplies([limited(), good]);
   await s.eval(`window.__alefSolver.stop(); 'ok'`);

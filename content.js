@@ -2807,6 +2807,8 @@
       const ms = Math.round(performance.now() - t0);
       if (!ans || !ans.rateLimited) return { ans, ms };
       if (stopRun) return { stopped: true };
+      // Some waits have an end (the site's own error message is given four): past it the failure stands.
+      if (Number.isFinite(ans.retryLimit) && tries >= ans.retryLimit) return { ans, ms };
 
       const wait = rateWaitMs(tries, ans.retryAfterMs);
       console.warn('[alef-solver] rate limited:', ans.limitNote || ans.error);

@@ -1044,6 +1044,19 @@ function gwChatLost(out) {
  *  matches, a refusal — is not a wait, and asking again would only be refused again. */
 const GW_RETRY_CODES = [1013, 1037, 1060, 1095];
 
+/** The site's own fallback message, when a request fails on its side. It arrives as the REPLY, in
+ *  the voice of the model — "I seem to be encountering an error. Can I try something else for
+ *  you?" — so nothing in the transport says it went wrong, and it used to be taken for an answer
+ *  that could not be read. It is never an answer: an answer is JSON, which this has none of. */
+const GW_ERROR_REPLY = /encountering an error|try something else for you|something went wrong/i;
+function gwErrorReply(text) {
+  const t = String(text || '').trim();
+  return !!t && t.length < 400 && !/[{[]/.test(t) && GW_ERROR_REPLY.test(t);
+}
+/** How long to wait before the second and the third try after such a reply. */
+const GW_ERROR_REPLY_WAITS = [2000, 6000];
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 /* ------------------------------------------- the Gemini session, kept between questions */
 
 /* Every question used to begin by downloading the whole gemini.google.com page to read its tokens
@@ -1226,6 +1239,20 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
     saved = null;
     out = await generate(null);
   }
+  // The site's own error message came back as the reply. Nothing says why — a session gone stale, a
+  // conversation that has gone bad, the site having a moment — so each retry changes both things
+  // that are ours to change: a fresh session, and a fresh conversation (the one that just said this
+  // is not one to go on with). It waits a little first, longer the second time.
+  for (let n = 0; out.ok && !out.failure && gwErrorReply(out.text) && n < GW_ERROR_REPLY_WAITS.length; n++) {
+    await chatClear(GW_CHAT_KEY);
+    saved = null;
+    await pause(GW_ERROR_REPLY_WAITS[n]);
+    await gwCacheDrop();
+    sess = await gwSession(tab, cfg, { fresh: true });
+    ({ models, model } = pick(sess.found));
+    stage.cached = false;
+    out = await generate(null);
+  }
   stage.ai = (stage.ai || 0) + (Date.now() - tGen);
 
   if (!out.ok) {
@@ -1236,6 +1263,14 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
     // `retryable` and `code` ride along for askCore: a code that means "not now" is waited out.
     return { ok: false, status: 429, code: out.code, retryable: GW_RETRY_CODES.includes(out.code),
              text: async () => JSON.stringify({ error: { message: out.failure } }) };
+  }
+
+  // Still its own error message after all the tries: not an answer. (The conversation it came from is
+  // not kept: each try cleared it first, and this is never saved.) 503 tells askCore it is worth
+  // waiting out — a few times, not for ever (see askPatiently).
+  if (gwErrorReply(out.text)) {
+    return { ok: false, status: 503, text: async () => JSON.stringify({
+      error: { message: `the Gemini site answered with its own error message: "${out.text.trim().slice(0, 140)}"` } }) };
   }
 
   if (reuse && out.text && out.cid && out.rid && out.rcid) {
@@ -1519,8 +1554,13 @@ async function askCore(payload) {
   // remembered here — `limit` is { note, retryAfterMs } — and the answer says so, so the page can
   // wait and ask again instead of ending the run.
   let limit = null;
-  const limited = (note, res) => {
-    limit = { note, retryAfterMs: Math.max(limit?.retryAfterMs || 0, retryAfterOf(res)) };
+  const limited = (note, res, { retryLimit } = {}) => {
+    limit = {
+      note,
+      retryAfterMs: Math.max(limit?.retryAfterMs || 0, retryAfterOf(res)),
+      // Most limits are waited out for as long as it takes; one that is given a number is not (see 503).
+      ...(retryLimit != null ? { retryLimit } : {}),
+    };
   };
   const hasImages = b => b.messages[1].content.some(c => c.type === 'image_url');
   const blind = new Set();       // models that said they cannot read a picture
@@ -1623,6 +1663,13 @@ async function askCore(payload) {
       // is no point walking the chain: stop and say which of the two usual causes it is.
       if (gweb && (res.status === 401 || res.status === 403 || /not signed in|no session token/i.test(detail))) {
         return { error: `${named}: gemini.google.com would not accept the session (HTTP ${res.status}) — open the site, sign in, and reload the tab. ${detail.slice(0, 140)}`, then: 'stop' };
+      }
+      // The site's own error message, still there after the quick tries inside geminiWebComplete: wait
+      // and ask again, but only a few times — a question it keeps failing on must end the run with
+      // a report, not hold it up for good.
+      if (gweb && res.status === 503) {
+        limited('the Gemini site answered with its own error message', res, { retryLimit: 4 });
+        return { error: `${named}: ${detail.slice(0, 200)}`, then: 'stop' };
       }
       if (gweb && res.status === 429) {
         // Only a code that means "not now" is waited out; any other failure the page reports as it did.
@@ -1760,6 +1807,7 @@ async function askCore(payload) {
   return {
     error: errors.join(' | ') || 'unknown failure',
     ...(limit ? { rateLimited: true, retryAfterMs: limit.retryAfterMs, limitNote: limit.note } : {}),
+    ...(limit?.retryLimit != null ? { retryLimit: limit.retryLimit } : {}),
   };
 }
 
