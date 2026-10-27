@@ -124,6 +124,104 @@ function chatUsable(chat, match) {
 
 /* --------------------------------------------------------------- prompt */
 
+/* --------------------------------------------------------------- subject guidance */
+
+// Small, fast models (the Flash-Lite kind) answer much better when told what the course expects and
+// what to watch for in that subject. Only the guidance for this lesson's subject is sent — a few lines,
+// not all of it — so the prompt stays short. The subject comes from the class the page names; failing
+// that, from the words of the question.
+
+const EXAM_RULES = [
+  'This is a lesson from the UAE Ministry of Education curriculum (the Alef platform). The right answer is',
+  'the one the course teaches, in the textbook\'s own terms — not a loophole or a technicality.',
+  'Read the whole question, and every choice, before answering. Watch for words that flip what is asked:',
+  'NOT, EXCEPT, LEAST, FALSE, INCORRECT; in Arabic ليس، لا، عدا، غير، إلا، الخطأ، غير الصحيح. Rule the wrong',
+  'choices out one by one; when two look right, the one that answers exactly what is asked wins.',
+  'A typed answer is written in the language of the question (Arabic for an Arabic question).',
+].join('\n');
+
+const SUBJECT_TIPS = {
+  math: [
+    'Subject: mathematics. Work it out in "work": the rule or formula, the substitution, the result.',
+    'Check the result (substitute it back, or estimate). Geometry: use the figure\'s labels and the theorem',
+    'the lesson is about (midsegment, similar triangles, parallel lines and angle pairs, Pythagoras);',
+    'angles on a line add to 180°, in a triangle to 180°. Keep exact values (fractions, sqrt, pi) unless told',
+    'to round; follow the rounding asked for exactly.',
+  ],
+  physics: [
+    'Subject: physics. In "work": list the known quantities with units, pick the formula, convert to SI',
+    'units first (cm→m, g→kg, km/h→m/s, min→s), then calculate. Use g = 9.8 m/s² unless the question gives',
+    'another value. Keep track of direction and sign for vectors. Give the unit the question asks for and',
+    'round as instructed. For concept questions, answer from the law involved (Newton\'s laws, conservation',
+    'of energy and momentum, Ohm\'s law, waves), not from everyday intuition.',
+  ],
+  chemistry: [
+    'Subject: chemistry. In "work": write and balance the equation if there is one; moles = mass ÷ molar',
+    'mass, use periodic-table atomic masses; keep units and significant figures. Use periodic trends',
+    '(atomic radius falls across a period and rises down a group; ionisation energy and electronegativity',
+    'the opposite), electron configurations (aufbau, Hund, Pauli), ion charges from the group, and IUPAC',
+    'names. Ionic bonds: metal + non-metal; covalent: non-metals.',
+  ],
+  biology: [
+    'Subject: biology. Answer with the textbook term and process (cells and organelles, genetics and',
+    'Punnett squares, body systems, ecology and food chains, photosynthesis and respiration). For a',
+    'genetics cross, work out the ratios in "work".',
+  ],
+  science: [
+    'Subject: science. Answer from the scientific concept the lesson teaches, with the textbook\'s terms.',
+    'For any calculation, show the formula and units in "work".',
+  ],
+  arabic: [
+    'المادة: اللغة العربية. أجب وفق قواعد النحو والصرف والبلاغة كما تُدرَّس في المنهج: حدِّد موقع الكلمة',
+    'الإعرابي (فاعل، مفعول به، مبتدأ، خبر، حال، تمييز…) وعلامة إعرابها، ونوع الأسلوب البلاغي (تشبيه، استعارة،',
+    'كناية، طباق، جناس) والغرض منه. في أسئلة الفهم اعتمد على النص المعطى نفسه ومعنى الكلمة في سياقها.',
+    'انقل الخيار أو الكلمة كما هي في الصفحة، بالتشكيل نفسه، ولا تترجم. ضع تحليلك المختصر في "work".',
+  ],
+  islamic: [
+    'المادة: التربية الإسلامية. أجب وفق ما يقرّره منهج التربية الإسلامية في دولة الإمارات (المذهب السني،',
+    'وما يدرَّس في الكتاب المدرسي): معاني الآيات والأحاديث، الأحكام الفقهية وشروطها وأركانها، السيرة النبوية',
+    'وتواريخها، العقيدة والأخلاق. انتبه للفرق بين الواجب والسنة والمباح والمكروه والحرام، وبين الركن والشرط.',
+    'أجب بلغة السؤال، وانقل الخيار كما هو.',
+  ],
+  social: [
+    'Subject: social studies / moral education (UAE curriculum). Answer as the textbook teaches: UAE history',
+    '(the union on 2 December 1971, the founding fathers, the seven emirates), geography and map reading,',
+    'citizenship, government and the economy, world history as covered in the unit. Use the dates, names and',
+    'figures in the passage or source when one is given. For an Arabic question, answer in Arabic.',
+  ],
+  english: [
+    'Subject: English. Grammar questions: decide from the words on both sides of the gap (tense, agreement,',
+    'part of speech, articles, prepositions). Reading: answer from the passage itself, matching meaning, not',
+    'just shared words. Vocabulary: the meaning the word has in that sentence.',
+  ],
+};
+
+/** Which of SUBJECT_TIPS fits this question: the class the page names, else the words of the question. */
+function subjectOf(p) {
+  const cls = String(p.subject || '').toLowerCase();
+  const byClass = [
+    [/math|رياضيات/, 'math'], [/physic|فيزياء/, 'physics'], [/chem|كيمياء/, 'chemistry'],
+    [/biolog|أحياء|احياء/, 'biology'], [/islam|إسلامي|اسلامي|قرآن/, 'islamic'],
+    [/social|moral|اجتماعي|أخلاق|الدراسات/, 'social'], [/\barabic\b|اللغة العربية|لغتي/, 'arabic'],
+    [/english|إنجليزي/, 'english'], [/science|علوم/, 'science'],
+  ].find(([re]) => re.test(cls));
+  if (byClass) return byClass[1];
+  // No class named: what the question itself is about.
+  const t = [p.stem, p.passage, p.instruction, p.cloze?.text, p.dropdown?.text, ...(p.options || []).map(o => o?.text)].join(' ');
+  if (/آية|سورة|حديث|رسول الله|صلاة|زكاة|صيام|وضوء|الحج|صلى الله عليه|الفقه|العقيدة|حكم شرعي|ما حكم/.test(t)) return 'islamic';
+  if (/إعراب|الفاعل|المفعول|المبتدأ|الخبر|البلاغ|استعارة|تشبيه|كناية|جمع تكسير|الفعل المضارع|نحو/.test(t)) return 'arabic';
+  if (/\b(?:mol|moles?|molar|electrons?|ions?|periodic|compound|reaction|atom(?:ic)?)\b/i.test(t)) return 'chemistry';
+  if (/\b(?:velocity|acceleration|force|newtons?|joules?|momentum|current|voltage|resistance|m\/s)\b/i.test(t)) return 'physics';
+  if (/\b(?:triangle|angle|equation|solve|polynomial|function|slope|area|perimeter|fraction|graph|midsegment)\b|[=√π∠]|\d\s*[x+\-*/^]\s*\d/i.test(t)) return 'math';
+  return '';
+}
+
+/** The rules every question gets, and the guidance for its subject when it has one. */
+function guidanceFor(p) {
+  const sub = subjectOf(p);
+  return [EXAM_RULES, ...(sub ? ['', ...SUBJECT_TIPS[sub]] : [])].join('\n');
+}
+
 const SYSTEM = [
   'You are taking a multiple-choice exam. You are shown the question stem, the',
   'answer choices, and usually a reading passage or a figure.',
@@ -134,9 +232,16 @@ const SYSTEM = [
   'against the passage. If a figure or diagram is shown as an image, read the',
   'image and answer from what it actually shows.',
   '',
+  'Math and science: work it out before you answer. Put the key steps in "work" (short: the',
+  'formula, the numbers, the result — under 50 words), then give the answer that matches them. Read',
+  'every number and label in the text and in any figure; do not assume a figure is drawn to scale.',
+  'Follow the question\'s instructions on form exactly: round as told, simplest form for fractions',
+  'unless a decimal is asked for, the unit it asks for. Re-check signs and arithmetic. For anything',
+  'that needs no calculation, leave "work" empty.',
+  '',
   'Respond with ONLY a JSON object. No prose, no markdown fences, no explanation',
   'outside the object:',
-  '{"answer":"<letter>","index":<zero-based index of the chosen choice>,"confidence":<0.0-1.0>,"why":"<at most 12 words>"}',
+  '{"work":"<steps, or empty>","answer":"<letter>","index":<zero-based index of the chosen choice>,"confidence":<0.0-1.0>,"why":"<at most 12 words>"}',
 ].join('\n');
 
 const MULTI_SYSTEM = [
@@ -151,8 +256,15 @@ const MULTI_SYSTEM = [
   'open where it should be closed, "<" for "≤", a flipped sign, a rounded value that is off.',
   'For a calculation, work the answer out first, then compare each choice with your result.',
   '',
+  'Math and science: work it out before you answer. Put the key steps in "work" (short: the',
+  'formula, the numbers, the result — under 50 words), then give the answer that matches them. Read',
+  'every number and label in the text and in any figure; do not assume a figure is drawn to scale.',
+  'Follow the question\'s instructions on form exactly: round as told, simplest form for fractions',
+  'unless a decimal is asked for, the unit it asks for. Re-check signs and arithmetic. For anything',
+  'that needs no calculation, leave "work" empty.',
+  '',
   'Respond with ONLY a JSON object. No prose, no markdown fences:',
-  '{"answers":["<letter>","<letter>"],"indices":[<zero-based index>,<zero-based index>],"confidence":<0.0-1.0>,"why":"<at most 12 words>"}',
+  '{"work":"<steps, or empty>","answers":["<letter>","<letter>"],"indices":[<zero-based index>,<zero-based index>],"confidence":<0.0-1.0>,"why":"<at most 12 words>"}',
   'Every correct choice exactly once, in order; "answers" and "indices" must name the same choices.',
 ].join('\n');
 
@@ -170,13 +282,23 @@ const CLOZE_SYSTEM = [
   'Use the figures or data in the instructions to decide the direction and size of',
   'each change — do not answer from the passage alone if numbers are provided.',
   '',
-  'A blank can be a math answer box (the exercise then says so). Answer it with the',
-  'math itself, typed as plain text: x^2 for a power, sqrt(x) for a root, (a)/(b) for a',
-  'fraction, pi, <= and >=. No $ signs, no backslashes, no words, no units unless the',
-  'box asks for them. For a polynomial, write the whole expression the box stands for.',
+  'A blank can be a math answer box (the exercise then says so), and a number to type is',
+  'math too. Answer with the math itself, typed as plain text: x^2 for a power, sqrt(x) for',
+  'a root, 3/4 for a fraction ((x+1)/(2) when the top or bottom has more than one term),',
+  '2 1/2 for a mixed number, pi, <= and >=. No $ signs, no LaTeX, no backslashes, no words.',
+  'Write only what goes in the box: not the variable and "=" when the text already has',
+  'them before the box, and not a unit the text already shows after it (so "35", not',
+  '"35°" before "°"). For a polynomial, write the whole expression the box stands for.',
+  '',
+  'Math and science: work it out before you answer. Put the key steps in "work" (short: the',
+  'formula, the numbers, the result — under 50 words), then give the answer that matches them. Read',
+  'every number and label in the text and in any figure; do not assume a figure is drawn to scale.',
+  'Follow the question\'s instructions on form exactly: round as told, simplest form for fractions',
+  'unless a decimal is asked for, the unit it asks for. Re-check signs and arithmetic. For anything',
+  'that needs no calculation, leave "work" empty.',
   '',
   'Respond with ONLY a JSON object. No prose, no markdown fences:',
-  '{"blanks":["<answer for BLANK 1>","<answer for BLANK 2>"],"confidence":<0.0-1.0>,"why":"<at most 12 words>"}',
+  '{"work":"<steps, or empty>","blanks":["<answer for BLANK 1>","<answer for BLANK 2>"],"confidence":<0.0-1.0>,"why":"<at most 12 words>"}',
   'One entry per blank, in order, with exactly as many entries as there are blanks.',
 ].join('\n');
 
@@ -191,8 +313,15 @@ const DROPDOWN_SYSTEM = [
   'any figures given to decide direction and size of a change. When two options',
   'look alike, the one that fits the sentence structure is the answer.',
   '',
+  'Math and science: work it out before you answer. Put the key steps in "work" (short: the',
+  'formula, the numbers, the result — under 50 words), then give the answer that matches them. Read',
+  'every number and label in the text and in any figure; do not assume a figure is drawn to scale.',
+  'Follow the question\'s instructions on form exactly: round as told, simplest form for fractions',
+  'unless a decimal is asked for, the unit it asks for. Re-check signs and arithmetic. For anything',
+  'that needs no calculation, leave "work" empty.',
+  '',
   'Respond with ONLY a JSON object. No prose, no markdown fences:',
-  '{"picks":[<zero-based option index for BLANK 1>,<for BLANK 2>],"confidence":<0.0-1.0>,"why":"<at most 12 words>"}',
+  '{"work":"<steps, or empty>","picks":[<zero-based option index for BLANK 1>,<for BLANK 2>],"confidence":<0.0-1.0>,"why":"<at most 12 words>"}',
   'One integer per blank, in order, each counting from 0 within that blank\'s own list.',
 ].join('\n');
 
@@ -206,9 +335,10 @@ const MATCH_SYSTEM = [
   'its direction and size), then find the statement that says exactly that. Watch',
   'for near-misses: "rose by 14 points" is not "rose to 24%", and a small change',
   'is not a large one. Each RIGHT statement is used at most once.',
+  'Put your reasoning for each pair in "work" first (short), then the pairs.',
   '',
   'Respond with ONLY a JSON object. No prose, no markdown fences:',
-  '{"pairs":[<RIGHT number for LEFT 1>,<RIGHT number for LEFT 2>],"confidence":<0.0-1.0>,"why":"<at most 12 words>"}',
+  '{"work":"<short reasoning>","pairs":[<RIGHT number for LEFT 1>,<RIGHT number for LEFT 2>],"confidence":<0.0-1.0>,"why":"<at most 12 words>"}',
   'One integer per LEFT item, in order, using the RIGHT numbers exactly as listed,',
   'which count from 0.',
 ].join('\n');
@@ -222,9 +352,10 @@ const DRAG_SYSTEM = [
   'Pick the one item that completes each gap. Read both sides of the gap: the item',
   'has to fit the grammar (singular or plural, noun or verb) as well as the meaning.',
   'Check that the finished sentence reads naturally and says something sensible.',
+  'For a calculation or a fact, work it out in "work" first (short), then choose.',
   '',
   'Respond with ONLY a JSON object. No prose, no markdown fences:',
-  '{"fills":[<item number for BLANK 1>,<item number for BLANK 2>],"confidence":<0.0-1.0>,"why":"<at most 12 words>"}',
+  '{"work":"<steps, or empty>","fills":[<item number for BLANK 1>,<item number for BLANK 2>],"confidence":<0.0-1.0>,"why":"<at most 12 words>"}',
   'One integer per gap, in order, using the item numbers exactly as listed, which',
   'count from 0. Never repeat a number.',
 ].join('\n');
@@ -236,10 +367,12 @@ const SORT_SYSTEM = [
   '',
   'Some items may describe audio you cannot hear. Use the wording and common sense to',
   'give the most likely order; a guess is better than no answer. A question usually',
-  'comes before its answer, and a greeting before the rest.',
+  'comes before its answer, and a greeting before the rest. For steps of a method or a',
+  'process (a solution, an experiment, a historical sequence), think the order through in',
+  '"work" first (short).',
   '',
   'Respond with ONLY a JSON object. No prose, no markdown fences:',
-  '{"order":[<number of the item that comes FIRST>,<number of the SECOND>,...],"confidence":<0.0-1.0>,"why":"<at most 12 words>"}',
+  '{"work":"<short reasoning>","order":[<number of the item that comes FIRST>,<number of the SECOND>,...],"confidence":<0.0-1.0>,"why":"<at most 12 words>"}',
   'Every item exactly once, using the numbers exactly as listed, which count from 0.',
 ].join('\n');
 
@@ -250,6 +383,23 @@ function buildText(p) {
   const text = buildQuestionText(p);
   const tried = (p.tried || []).map(t => String(t?.label ?? '').trim()).filter(Boolean);
   if (!tried.length) return text;
+  // Several boxes in one question: say which the page marked right (keep) and wrong (change). When it
+  // did not say, change as little as possible — asked again, a model tends to change every box, and
+  // turned right ones wrong.
+  const last = (p.tried || [])[p.tried.length - 1];
+  if (Array.isArray(last?.blanks) && last.blanks.length > 1) {
+    const marked = last.blanks.some(b => b?.mark);
+    return [
+      text, '',
+      '=== PREVIOUS ATTEMPT (marked WRONG) ===',
+      ...last.blanks.map((b, i) => `BLANK ${i + 1}: ${b?.value || '(empty)'}${b?.mark === 'right' ? ' — marked CORRECT: keep exactly this'
+        : b?.mark === 'wrong' ? ' — marked WRONG: give a different answer' : ''}`),
+      marked
+        ? 'Keep every blank marked correct exactly as it is, and change only the ones marked wrong.'
+        : 'At least one blank was wrong, but the page did not say which. Keep the blanks you are sure of, and change only the one or two most likely to be wrong — do not change everything.',
+      ...(tried.length > 1 ? ['', 'Earlier attempts, also wrong:', ...tried.slice(0, -1).map((t, i) => `${i + 1}. ${t}`)] : []),
+    ].join('\n');
+  }
   return [
     text, '',
     '=== PREVIOUS ATTEMPTS ===',
@@ -311,7 +461,7 @@ function buildQuestionText(p) {
     const mathAt = (p.cloze?.blanks || []).map((b, i) => (b && b.math ? i + 1 : 0)).filter(Boolean);
     if (mathAt.length) {
       lines.push(`=== MATH === BLANK ${mathAt.join(', ')} ${mathAt.length > 1 ? 'are math answer boxes' : 'is a math answer box'}: ` +
-                 'write the answer as plain typed math (x^2, sqrt(x), (a)/(b)), nothing else.');
+                 'write the answer as plain typed math (x^2, sqrt(x), 3/4), nothing else.');
     }
     return lines.join('\n');
   }
@@ -373,12 +523,14 @@ function buildBody(cfg, p) {
 
   return {
     messages: [
-      { role: 'system', content: p.kind === 'cloze' ? CLOZE_SYSTEM
+      // The course and subject first, then the task and its answer format — the format last, where a
+      // model heeds it most.
+      { role: 'system', content: `${guidanceFor(p)}\n\n${p.kind === 'cloze' ? CLOZE_SYSTEM
                                : p.kind === 'dropdown' ? DROPDOWN_SYSTEM
                                : p.kind === 'match' ? MATCH_SYSTEM
                                : p.kind === 'drag' ? DRAG_SYSTEM
                                : p.kind === 'sort' ? SORT_SYSTEM
-                               : p.multi ? MULTI_SYSTEM : SYSTEM },
+                               : p.multi ? MULTI_SYSTEM : SYSTEM}` },
       { role: 'user', content },
     ],
     // Deterministic the first time. After a wrong answer some spread helps: it
@@ -735,6 +887,46 @@ async function dsNewSession(token) {
  *  means `v` is a piece of it. Thinking arrives on its own path and is dropped. */
 function parseDeepseekStream(raw) {
   let text = '', path = '', messageId = null, finish = '';
+  // The kind of each fragment the reply is built from, in order. Expert mode streams its
+  // reasoning as THINK fragments on the very same `fragments/-1/content` path as the answer,
+  // so a string is only part of the answer when the fragment it lands in is a RESPONSE one.
+  // An empty list means the site never named its fragments (the older protocol): take it all.
+  const frags = [];
+  const addFrags = list => {
+    for (const f of list || []) {
+      if (!f || typeof f !== 'object') continue;
+      frags.push(String(f.type || ''));
+      if (f.type === 'RESPONSE' && typeof f.content === 'string') text += f.content;
+    }
+  };
+  const isAnswer = p => {
+    if (/thinking/.test(p)) return false;
+    if (!frags.length) return true;
+    const m = p.match(/fragments\/(-?\d+)\/content$/);
+    if (!m) return true;
+    const i = Number(m[1]);
+    return frags[i < 0 ? frags.length + i : i] === 'RESPONSE';
+  };
+  const apply = (p, v) => {
+    if (v && typeof v === 'object' && !Array.isArray(v) && v.response) {
+      addFrags(v.response.fragments);
+      // The assistant's message id is what the next question in the same thread hangs from. The
+      // site has put it under `message_id` or `id`, on the response or on the frame itself.
+      for (const holder of [v.response, v]) {
+        const id = holder?.message_id ?? holder?.id;
+        if (Number.isInteger(id)) { messageId = id; break; }
+      }
+    } else if (Array.isArray(v) && /fragments$/.test(p)) {
+      addFrags(v);
+    } else if (Array.isArray(v)) {
+      // A batch of changes under one path: each names its own path relative to it.
+      for (const c of v) if (c && typeof c === 'object' && typeof c.p === 'string') apply(p ? `${p}/${c.p}` : c.p, c.v);
+    } else if (Number.isInteger(v) && /message_id$/.test(p)) {
+      messageId = v;
+    } else if (typeof v === 'string' && /content$/.test(p) && isAnswer(p)) {
+      text += v;
+    }
+  };
   for (const line of String(raw).split('\n')) {
     const t = line.trim();
     if (!t.startsWith('data:')) continue;
@@ -746,27 +938,17 @@ function parseDeepseekStream(raw) {
     try { j = JSON.parse(payload); } catch { continue; }
     const frame = (j?.data && typeof j.data === 'object' && ('v' in j.data || 'p' in j.data)) ? j.data : j;
     if (typeof frame?.finish_reason === 'string') finish = frame.finish_reason;
+    // A frame with no path carries on where the last one was.
     if (typeof frame?.p === 'string') path = frame.p;
 
     const v = frame?.v;
     // The end marker arrives bare (`data: [DONE]`) but is accepted framed too; either way it
     // ends the message and must not be read as another piece of the answer.
     if (v === '[DONE]' || frame === '[DONE]') { finish = finish || 'stop'; continue; }
-    if (v && typeof v === 'object' && v.response) {
-      for (const f of v.response.fragments || []) {
-        if (f?.type === 'RESPONSE' && f.content) { path = 'response/fragments/-1/content'; text += f.content; }
-      }
-      // The assistant's message id is what the next question in the same thread hangs from. The
-      // site has put it under `message_id` or `id`, on the response or on the frame itself.
-      for (const holder of [v.response, v]) {
-        const id = holder?.message_id ?? holder?.id;
-        if (Number.isInteger(id)) { messageId = id; break; }
-      }
-    } else if (Number.isInteger(v) && /message_id$/.test(path)) {
-      messageId = v;
-    } else if (typeof v === 'string' && /content$/.test(path) && !/thinking/.test(path)) {
-      text += v;
-    }
+    apply(path, v);
+    // After a new set of fragments, bare appends go into the last one.
+    if (Array.isArray(v) && /fragments$/.test(path)) path = `${path}/-1/content`;
+    else if (v && typeof v === 'object' && !Array.isArray(v) && v.response) path = 'response/fragments/-1/content';
   }
   return { text, messageId, finish };
 }
@@ -893,27 +1075,99 @@ async function dsRound(cfg, token, prompt, modelType, thinkingOff, chat) {
  * So this side decides what to ask and how to read the answer, and the tab does the talking.
  */
 
+/* ------------------------------------------------------------------ Gemini trace */
+
+// Every step a Gemini-site question takes — finding the tab, the session, the model, each request and
+// how it ended — one line each, with the time. Kept in storage (the newest GW_LOG_MAX lines), so it
+// survives the service worker going to sleep, and copied into failure reports and by the popup's
+// "Copy Gemini log". Nothing secret goes in: no tokens, no cookies, only lengths and short heads.
+const GW_LOG_KEY = 'geminiWebLog';
+const GW_LOG_MAX = 300;
+let gwLogBuf = null;
+let gwLogChain = Promise.resolve();
+function gwLog(step, data = {}) {
+  const line = { at: Date.now(), step, ...data };
+  try { console.log('[alef-solver gemini]', step, data); } catch { /* no console */ }
+  gwLogChain = gwLogChain.then(async () => {
+    if (!gwLogBuf) {
+      try { gwLogBuf = (await chrome.storage.local.get(GW_LOG_KEY))?.[GW_LOG_KEY] || []; } catch { gwLogBuf = []; }
+      if (!Array.isArray(gwLogBuf)) gwLogBuf = [];
+    }
+    gwLogBuf.push(line);
+    if (gwLogBuf.length > GW_LOG_MAX) gwLogBuf.splice(0, gwLogBuf.length - GW_LOG_MAX);
+    try { await chrome.storage.local.set({ [GW_LOG_KEY]: gwLogBuf }); } catch { /* the console has it */ }
+  }).catch(() => {});
+  return gwLogChain;
+}
+/** The log as text, newest last: `HH:MM:SS.mmm step key=value …`. `sinceMs` keeps only recent lines. */
+async function gwLogText({ limit = 120, sinceMs = 0 } = {}) {
+  await gwLogChain;
+  let lines = gwLogBuf;
+  if (!lines) { try { lines = (await chrome.storage.local.get(GW_LOG_KEY))?.[GW_LOG_KEY] || []; } catch { lines = []; } }
+  const cut = sinceMs ? Date.now() - sinceMs : 0;
+  const show = v => (typeof v === 'string' ? JSON.stringify(v.length > 300 ? `${v.slice(0, 300)}…` : v) : JSON.stringify(v));
+  return lines.filter(l => l.at >= cut).slice(-limit).map(({ at, step, ...rest }) =>
+    `${new Date(at).toISOString().slice(11, 23)} ${step}${Object.entries(rest).map(([k, v]) => ` ${k}=${show(v)}`).join('')}`).join('\n');
+}
+
 /** Is any gemini.google.com tab open and listening? Answers with the tab, or null. */
 async function gwTab() {
   let tabs = [];
-  try { tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' }); } catch { return null; }
+  try { tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' }); } catch (e) { gwLog('tab.query-failed', { error: String(e?.message || e) }); return null; }
+  gwLog('tab.found', { count: tabs.length, tabs: tabs.map(t => ({ id: t.id, status: t.status, discarded: !!t.discarded, path: String(t.url || '').replace(/^https:\/\/gemini\.google\.com/, '').slice(0, 40) })) });
+  for (const tab of tabs) {
+    if (tab.id != null && await gwPing(tab.id)) { gwLog('tab.ready', { id: tab.id }); return tab; }
+  }
+  if (tabs.length) gwLog('tab.no-answer', { note: 'no Gemini tab answers — reconnecting' });
+  // None answers. The usual reason: the extension was reloaded, and the tab still runs the old copy
+  // of gemini-web.js, cut off from this one — or the browser put the tab to sleep. Bring one back
+  // rather than tell the person to: put the script in again, or wake the tab.
   for (const tab of tabs) {
     if (tab.id == null) continue;
     try {
-      const r = await chrome.tabs.sendMessage(tab.id, { type: 'gw-ping' });
-      if (r?.ok) return tab;
-    } catch { /* no listener in that tab: it is old, or still loading */ }
+      if (tab.discarded || tab.status === 'unloaded') {
+        gwLog('tab.waking', { id: tab.id });
+        await chrome.tabs.reload(tab.id);
+        for (let i = 0; i < 40; i++) { await pause(250); if ((await chrome.tabs.get(tab.id))?.status === 'complete') break; }
+      } else {
+        gwLog('tab.inject', { id: tab.id });
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['gemini-web.js'] });
+      }
+    } catch (e) { gwLog('tab.repair-failed', { id: tab.id, error: String(e?.message || e) }); continue; }
+    for (let i = 0; i < 20; i++) { if (await gwPing(tab.id)) { gwLog('tab.reconnected', { id: tab.id, afterMs: i * 250 }); return tab; } await pause(250); }
+    gwLog('tab.still-silent', { id: tab.id });
   }
+  // No Gemini tab at all: open one in the background. The login is the browser's, so a signed-in
+  // person needs nothing more.
+  if (!tabs.length) {
+    try {
+      gwLog('tab.opening', { note: 'no Gemini tab open — opening one in the background' });
+      const t = await chrome.tabs.create({ url: 'https://gemini.google.com/app', active: false });
+      for (let i = 0; i < 60; i++) { await pause(500); if (await gwPing(t.id)) { gwLog('tab.opened', { id: t.id, afterMs: (i + 1) * 500 }); return t; } }
+      gwLog('tab.opened-silent', { id: t.id });
+    } catch (e) { gwLog('tab.open-failed', { error: String(e?.message || e) }); }
+  }
+  gwLog('tab.none', {});
   return null;
 }
 
+async function gwPing(tabId) {
+  try { return !!(await chrome.tabs.sendMessage(tabId, { type: 'gw-ping' }))?.ok; } catch { return false; }
+}
+
 /** Ask that tab to do something, and say plainly what to do when there is no tab. */
+const GW_CALL_MS = 120000;           // the tab's own limits are shorter; this is for a tab that never replies
 async function gwCall(tabId, msg) {
   try {
-    const r = await chrome.tabs.sendMessage(tabId, msg);
+    let timer;
+    const r = await Promise.race([
+      chrome.tabs.sendMessage(tabId, msg),
+      new Promise((_, no) => { timer = setTimeout(() => no(new Error(`no reply in ${GW_CALL_MS / 1000} s`)), GW_CALL_MS); }),
+    ]).finally(() => clearTimeout(timer));
     if (!r) throw new Error('no reply');
     return r;
   } catch (e) {
+    gwLog('tab.call-failed', { request: msg?.type, error: String(e?.message || e) });
     throw new Error(`lost contact with the Gemini tab (${e.message || e}) — reload it and try again`);
   }
 }
@@ -993,7 +1247,36 @@ async function gwUploadResumable(bytes, type, name, pushId) {
  *  gets no cross-origin exemption from host permissions the way a service worker does, so from
  *  the page this request would be refused by CORS before it was ever sent. Unlike DeepSeek,
  *  the site does read pictures, so this path is worth having. */
+/** A screenshot no bigger than the model needs. A high-density screen captures at three times the
+ *  size it shows (3000-odd pixels across), which is slow to upload and slow for the model to take
+ *  in, for no gain in what it can read. Scaled to GW_SHOT_MAX on the long side, as a JPEG. Anything
+ *  that goes wrong leaves the picture as it was. */
+const GW_SHOT_MAX = 1400;
+async function gwShrink(dataUrl) {
+  try {
+    if (typeof OffscreenCanvas === 'undefined' || typeof createImageBitmap === 'undefined') return dataUrl;
+    const blob = await (await fetch(dataUrl)).blob();
+    const bmp = await createImageBitmap(blob);
+    const scale = Math.min(1, GW_SHOT_MAX / Math.max(bmp.width, bmp.height));
+    if (scale >= 1 && blob.size < 400000) { bmp.close?.(); return dataUrl; }
+    const w = Math.max(1, Math.round(bmp.width * scale)), h = Math.max(1, Math.round(bmp.height * scale));
+    const canvas = new OffscreenCanvas(w, h);
+    canvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
+    bmp.close?.();
+    const out = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.72 });
+    const buf = new Uint8Array(await out.arrayBuffer());
+    let bin = '';
+    for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+    gwLog('picture.shrunk', { from: `${blob.size} bytes`, to: `${out.size} bytes`, size: `${w}x${h}` });
+    return `data:image/jpeg;base64,${btoa(bin)}`;
+  } catch (e) {
+    gwLog('picture.shrink-failed', { error: String(e?.message || e) });
+    return dataUrl;
+  }
+}
+
 async function gwUpload(dataUrl, pushId) {
+  if (typeof OffscreenCanvas !== 'undefined') dataUrl = await gwShrink(dataUrl);
   const m = /^data:([^;,]+)?(;base64)?,(.*)$/.exec(String(dataUrl || ''));
   if (!m) return { ok: false, detail: 'the picture was not in a form that can be sent' };
 
@@ -1107,16 +1390,19 @@ async function gwSession(tab, cfg, { fresh = false, onSession = null } = {}) {
     const hit = await gwCacheGet(key);
     if (hit) {
       if (onSession) onSession(hit.session);
+      gwLog('session.cached', { models: (hit.found?.models || []).length, ageS: Math.round((Date.now() - (hit.at || 0)) / 1000) });
       return { session: hit.session, found: hit.found, cached: true, ms: Date.now() - t0 };
     }
   }
 
   const init = await gwCall(tab.id, { type: 'gw-init' });
-  if (!init.ok) throw new Error(init.detail || 'the Gemini page gave no session');
+  if (!init.ok) { gwLog('session.init-failed', { detail: init.detail || '' }); throw new Error(init.detail || 'the Gemini page gave no session'); }
+  gwLog('session.init', { account: init.session?.account || '(default)', hl: init.session?.hl, token: init.session?.at ? `${String(init.session.at).length} chars` : 'MISSING', bl: init.session?.bl || '', ms: Date.now() - t0 });
   if (onSession) onSession(init.session);
 
   const found = await gwCall(tab.id, { type: 'gw-models', session: init.session });
-  if (!found.ok) throw new Error(found.detail || 'the model list could not be read');
+  if (!found.ok) { gwLog('session.models-failed', { detail: found.detail || '' }); throw new Error(found.detail || 'the model list could not be read'); }
+  gwLog('session.models', { status: found.status, models: (found.models || []).map(m => m.label || m.name), capacity: found.capacity, ms: Date.now() - t0 });
 
   if (keep && found.status === 1000 && (found.models || []).length) {
     await gwCachePut({ key, at: Date.now(), session: init.session, found });
@@ -1135,6 +1421,7 @@ function gwSessionStale(out) {
 async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
   const stage = speedStages;                       // this question's timings (see "speed")
   const tStart = Date.now();
+  gwLog('ask.start', { wantedModel: modelName || '(none: Flash if the account has it)', thinking: thinkingOff ? 'low (retry)' : (cfg.geminiWebThinking || 'standard'), reuseChat: cfg.reuseChat !== false, picture: body.messages[1].content.some(c => c.type === 'image_url') });
   const tab = await gwTab();
   if (!tab) {
     throw new Error('open gemini.google.com in a tab, signed in, and leave it open — the extension borrows that tab because the login only works from there');
@@ -1142,7 +1429,22 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
 
   const user = body.messages[1];
   // The site takes one prompt and its own pictures: the system prompt is put on top of the user's text.
-  const prompt = [body.messages[0].content, '', ...user.content.filter(c => c.type === 'text').map(c => c.text)].join('\n');
+  // In a conversation that is being kept, the model has the instructions already, and very often the
+  // passage too (a lesson's questions share one): neither is sent again while it is unchanged. That is
+  // most of each prompt, so it is most of the tokens — and the time and the rate limit that go with them.
+  const system = body.messages[0].content;
+  const userText = user.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+  const passage = gwPassageOf(userText);
+  const promptFor = chat => {
+    let u = userText;
+    if (chat && passage && chat.passage === gwHash(passage)) u = u.replace(passage, '(the same passage as in my previous message)');
+    // The chat model ("Auto") sometimes answered in paragraphs, which cannot be read and cost a whole
+    // second ask. The format is said again last, where it is heeded most, and it is told not to deliberate.
+    const tail = '\n\nAnswer straight away, without working it out at length. Reply with ONLY the JSON object — no explanation, no markdown.';
+    return chat && chat.sys === gwHash(system)
+      ? `${u}${tail}`
+      : [system, '', u].join('\n') + tail;
+  };
 
   // A picture is uploaded to the site first and referenced by the address it hands back; the
   // site's own chat reads images, so unlike DeepSeek these are not thrown away. The upload needs
@@ -1163,14 +1465,20 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
 
   // An empty model box means the account's own default, which the site picks when no model
   // header is sent. That is the safest choice: it is always available to every account.
-  const wanted = String(modelName || '').trim().toLowerCase();
+  // GW_AUTO_FAST is the stand-in behind a chosen model when no fallback was set: the account's quickest
+  // model other than the one that just failed.
+  const auto = modelName === GW_AUTO_FAST;
+  const wanted = auto ? '' : String(modelName || '').trim().toLowerCase();
+  const avoid = auto ? String(cfg.geminiWebModel || '').trim().toLowerCase() : '';
   const pick = found => {
     const all = (found.models || []).map(m => ({ ...m, ...found.capacity }));
     const one = wanted
       ? all.find(m => m.name.toLowerCase() === wanted || m.label.toLowerCase() === wanted || m.id.toLowerCase() === wanted)
         || all.find(m => m.name.toLowerCase().includes(wanted) || wanted.includes(m.name.toLowerCase()))
       : null;
-    return { models: all, model: one };
+    // No model chosen: a fast one (Flash) rather than whatever the account defaults to, which can be
+    // a slow thinking model. Answers here are one short JSON object; speed is what matters.
+    return { models: all, model: one || (wanted ? null : gwFastModel(all, avoid)) };
   };
   let { models, model } = pick(sess.found);
   // A model missing from a remembered list may have been added since: look again before saying no.
@@ -1208,8 +1516,39 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
   const accountKey = sess.session.account || '';
   let saved = reuse ? await chatLoad(GW_CHAT_KEY) : null;
   if (saved && !(saved.cid && saved.rid && saved.rcid && chatUsable(saved, { account: accountKey, model: modelKey }))) saved = null;
+  // Some accounts refuse every follow-up in a conversation (error 1097): asking that way first cost
+  // half a second a question before the new conversation it ends in anyway. Once refused, they are
+  // asked in a new one straight away, for a day.
+  const noFollowUp = (await chatLoad(GW_NO_FOLLOWUP_KEY)) || {};
+  if (saved && noFollowUp[accountKey] && Date.now() - noFollowUp[accountKey] < 24 * 3600e3) {
+    gwLog('chat.skip-followup', { note: 'this account refuses follow-ups (1097): new conversation' });
+    saved = null;
+  }
 
-  const generate = chat => gwCall(tab.id, {
+  // Another model comes after this one in the chain: this one is not waited on for ever.
+  const another = !auto && !!(cfg.geminiWebFallbackModel || cfg.geminiWebModel) && wanted === String(cfg.geminiWebModel || '').trim().toLowerCase();
+  const stalled = (await chatLoad(GW_STALL_KEY)) || {};
+  if (another && model && stalled[model.id] && Date.now() - stalled[model.id] < GW_STALL_SKIP_MS) {
+    gwLog('ask.skip-stalled', { model: model.label || model.name, note: 'gave no answer lately — asking the next model' });
+    return { ok: false, status: 504, text: async () => JSON.stringify({
+      error: { message: `${model.label || model.name} gave no answer lately — asking the next model` } }) };
+  }
+  gwLog('ask.model', { picked: model ? (model.label || model.name) : '(account default)', id: model?.id || '', available: models.map(m => m.label || m.name), chat: saved ? `continuing, turn ${saved.turns + 1}` : 'new' });
+  const generate = async chat => {
+    const prompt = promptFor(chat);
+    const t = Date.now();
+    gwLog('gen.send', { chat: chat ? 'continued' : 'new', model: model?.label || model?.name || '(default)', promptChars: prompt.length, instructionsSent: !(chat && chat.sys === gwHash(system)), passageSent: !!passage && !(chat && chat.passage === gwHash(passage)), picture: !!fileData });
+    let r;
+    try { r = await generateRaw(chat, prompt); }
+    catch (e) { gwLog('gen.error', { ms: Date.now() - t, error: String(e?.message || e) }); throw e; }
+    gwLog('gen.reply', {
+      ms: Date.now() - t, ok: r.ok, status: r.status, failure: r.failure || '', code: r.code || 0, done: r.done,
+      textChars: (r.text || '').length, text: String(r.text || '').slice(0, 200), thoughtsChars: (r.thoughts || '').length,
+      detail: r.ok ? '' : String(r.detail || '').slice(0, 300), ids: r.cid ? 'yes' : 'no', ...(r.diag ? { tab: r.diag } : {}),
+    });
+    return r;
+  };
+  const generateRaw = (chat, prompt) => gwCall(tab.id, {
     type: 'gw-generate',
     session: sess.session,
     prompt,
@@ -1219,13 +1558,17 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
     thinking: thinkingOff ? 'low' : (cfg.geminiWebThinking || ''),
     fileData,
     chat: chat ? [chat.cid, chat.rid, chat.rcid] : null,
+    noTextMs: another ? GW_NO_TEXT_MS : 0,
   });
 
   const tGen = Date.now();
   let out = await generate(saved);
   // A remembered session the site no longer accepts shows up as a refused request. Ask again with
   // a fresh one before blaming the conversation, the account or the model; the same chat goes on.
+  let sessionRefused = false;          // refused, then refused again with a fresh session: not the model's fault
   if (sess.cached && gwSessionStale(out)) {
+    gwLog('retry.stale-session', { status: out.status, code: out.code || 0 });
+    sessionRefused = true;
     await gwCacheDrop();
     sess = await gwSession(tab, cfg, { fresh: true });
     ({ models, model } = pick(sess.found));
@@ -1235,7 +1578,22 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
   // The conversation was deleted from the site's list, or it would not be continued: ask again in
   // a fresh one, once. An empty allowance or a rate limit would fail the same way again.
   if (saved && gwChatLost(out)) {
+    gwLog('retry.chat-lost', { note: 'the kept conversation would not continue — new one', code: out.code || 0 });
+    if (out.code === 1097) {
+      await chatSave(GW_NO_FOLLOWUP_KEY, { ...noFollowUp, [accountKey]: Date.now() });
+      gwLog('chat.followups-off', { note: 'error 1097 on a follow-up: new conversations only, for a day' });
+    }
     await chatClear(GW_CHAT_KEY);
+    saved = null;
+    out = await generate(null);
+  }
+  // Flash was picked here, not by the person: if the site will not have it, the account's own default
+  // (no model named at all) is what used to work, so ask that way once, in a fresh conversation.
+  // Only a refusal that is still there with a fresh session (a 400): a rate limit or an empty
+  // allowance would only be spent again.
+  if (!wanted && model && !out.ok && out.status === 400 && !sessionRefused) {
+    gwLog('retry.default-model', { note: 'Flash refused — asking with the account default' });
+    model = null;
     saved = null;
     out = await generate(null);
   }
@@ -1244,6 +1602,7 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
   // that are ours to change: a fresh session, and a fresh conversation (the one that just said this
   // is not one to go on with). It waits a little first, longer the second time.
   for (let n = 0; out.ok && !out.failure && gwErrorReply(out.text) && n < GW_ERROR_REPLY_WAITS.length; n++) {
+    gwLog('retry.error-reply', { n: n + 1, text: String(out.text).slice(0, 120) });
     await chatClear(GW_CHAT_KEY);
     saved = null;
     await pause(GW_ERROR_REPLY_WAITS[n]);
@@ -1256,10 +1615,17 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
   stage.ai = (stage.ai || 0) + (Date.now() - tGen);
 
   if (!out.ok) {
+    gwLog('ask.failed', { status: out.status || 502, detail: String(out.detail || '').slice(0, 300) });
+    // Not a word of answer in all that time: remember it, so the next questions go to the next model.
+    if (out.status === 504 && model?.id && another) {
+      await chatSave(GW_STALL_KEY, { ...stalled, [model.id]: Date.now() });
+      gwLog('model.stalled', { model: model.label || model.name, note: `skipped for ${GW_STALL_SKIP_MS / 60000} min while another can answer` });
+    }
     return { ok: false, status: out.status || 502, text: async () => JSON.stringify({
       error: { message: out.detail || 'the Gemini page refused the request' } }) };
   }
   if (out.failure) {
+    gwLog('ask.refused', { code: out.code, failure: out.failure });
     // `retryable` and `code` ride along for askCore: a code that means "not now" is waited out.
     return { ok: false, status: 429, code: out.code, retryable: GW_RETRY_CODES.includes(out.code),
              text: async () => JSON.stringify({ error: { message: out.failure } }) };
@@ -1276,11 +1642,15 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
   if (reuse && out.text && out.cid && out.rid && out.rcid) {
     await chatSave(GW_CHAT_KEY, {
       cid: out.cid, rid: out.rid, rcid: out.rcid,
-      turns: (saved?.turns || 0) + 1, model: modelKey, account: accountKey, at: Date.now(),
+      turns: (saved?.turns || 0) + 1, model: model?.id || '', account: accountKey, at: Date.now(),
+      sys: gwHash(system), passage: passage ? gwHash(passage) : (saved?.passage || 0),
     });
   }
 
+  // It answered: whatever it did before, it is not stalled now.
+  if (model?.id && stalled[model.id]) { delete stalled[model.id]; await chatSave(GW_STALL_KEY, stalled); }
   const finish = out.done ? 'stop' : 'length';
+  gwLog('ask.done', { ms: Date.now() - tStart, finish, textChars: (out.text || '').length });
   return {
     ok: true,
     status: 200,
@@ -1288,6 +1658,41 @@ async function geminiWebComplete(cfg, body, modelName, thinkingOff) {
     json: async () => ({ choices: [{ message: { content: out.text }, finish_reason: finish }] }),
   };
 }
+
+const GW_NO_FOLLOWUP_KEY = 'geminiWebNoFollowUp';
+
+/** A short fingerprint of a text, to tell "the same as last time" without keeping the text. */
+function gwHash(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+/** The passage block of a prompt (see buildQuestionText), or ''. */
+function gwPassageOf(text) {
+  const m = /^=== PASSAGE ===\n([\s\S]*?)\n\n\n(?====)/m.exec(text);
+  return m && m[1].length > 200 ? m[1] : '';      // a short one is not worth the swap
+}
+
+/** The account's quickest model: a Flash that is not a thinking one, else any Flash, else none
+ *  (the account's own default). */
+function gwFastModel(models, avoid = '') {
+  const name = m => `${m.name || ''} ${m.label || ''} ${m.id || ''}`.toLowerCase();
+  const ok = m => !avoid || ![m.name, m.label, m.id].some(v => String(v || '').toLowerCase() === avoid);
+  // Flash-Lite first: of the models the site offers, it is the one that answers soonest.
+  return models.find(m => ok(m) && /flash.?lite/.test(name(m)))
+      || models.find(m => ok(m) && /flash/.test(name(m)) && !/think|pro|deep|research/.test(name(m)))
+      || models.find(m => ok(m) && /flash/.test(name(m))) || null;
+}
+
+/** The fallback put behind a chosen model when none was set (see the chain in ask). */
+const GW_AUTO_FAST = '__fastest__';
+/** Models that gave no answer at all lately, by id: skipped for GW_STALL_SKIP_MS while another
+ *  model can be asked, rather than costing every question the wait. */
+const GW_STALL_KEY = 'geminiWebStalled';
+const GW_STALL_SKIP_MS = 30 * 60000;
+/** How long a model with another behind it gets to start answering before that one is asked. */
+const GW_NO_TEXT_MS = 30000;
 
 /** Options' "Test key" for this provider: prove the tab, the login and the model list work,
  *  without asking the model anything. */
@@ -1540,7 +1945,7 @@ async function askCore(payload) {
   const chain = (gemini ? [cfg.geminiModel || DEFAULTS.geminiModel, cfg.geminiFallbackModel]
                : openai ? [cfg.openaiModel || DEFAULTS.openaiModel, cfg.openaiFallbackModel]
                : deepseek ? [cfg.deepseekModel || DEFAULTS.deepseekModel, cfg.deepseekFallbackModel]
-               : gweb ? [cfg.geminiWebModel, cfg.geminiWebFallbackModel].filter(Boolean)
+               : gweb ? [cfg.geminiWebModel, cfg.geminiWebFallbackModel || (cfg.geminiWebModel ? GW_AUTO_FAST : '')].filter(Boolean)
                : [cfg.model, cfg.fallbackModel]).filter(Boolean);
   if (gweb && !chain.length) chain.push('');   // the account's own default
   const oa = {};                 // OpenAI only: what a model has turned out not to accept (see toOpenAI)
@@ -1867,8 +2272,8 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
 
   if (msg.type === 'ask') {
     ask(msg.payload)
-      .then(respond)
-      .catch(e => respond({ error: String(e) }));
+      .then(r => { if (r?.error && /gemini/i.test(String(r.error))) gwLog('ask.gave-up', { error: String(r.error).slice(0, 400) }); respond(r); })
+      .catch(e => { gwLog('ask.threw', { error: String(e?.message || e) }); respond({ error: String(e) }); });
     return true;
   }
 
@@ -1893,6 +2298,17 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
 
   // The tab the extension will borrow, saying it is loaded and ready. Recorded so the popup can
   // say whether a usable tab exists without having to poll one every time it opens.
+  // Failure reports and the popup's "Copy Gemini log" read the trace with this.
+  if (msg.type === 'gw-log') {
+    gwLogText({ limit: msg.limit || 120, sinceMs: msg.sinceMs || 0 }).then(text => respond({ text })).catch(e => respond({ text: '', error: String(e) }));
+    return true;
+  }
+  if (msg.type === 'gw-log-clear') {
+    gwLogBuf = [];
+    chrome.storage.local.set({ [GW_LOG_KEY]: [] }).then(() => respond({ ok: true })).catch(() => respond({ ok: false }));
+    return true;
+  }
+
   if (msg.type === 'gw-ready') {
     chrome.storage.local.set({ geminiWebTabSeen: Date.now() }).catch(() => {});
     return;

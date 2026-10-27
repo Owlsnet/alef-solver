@@ -117,6 +117,17 @@
   }
 
   const para = document.getElementById('para');
+  // &bullets=1: the live Arabic layout — the sentence sits in .lib-dropdown-sentence-container with a
+  // bulleted list (ul > li) above it, two long lines that are part of the text, not choices.
+  if (q.has('bullets')) {
+    const wrap = document.createElement('div'); wrap.className = 'lib-dropdown-container-wrapper';
+    wrap.innerHTML = '<div class="lib-dropdown-fields-wrapper"><span><div class="lib-dropdown-sentence-container">'
+      + '<ul><li>Give yourself a few minutes to judge the size and shape of the tree, and picture how it will look once pruned.</li>'
+      + '<li>Mark the main branches that make up the frame of the tree, so that you do not remove them.</li></ul>'
+      + '</div></span></div>';
+    para.parentNode.insertBefore(wrap, para);
+    wrap.querySelector('.lib-dropdown-sentence-container').appendChild(para);
+  }
   for (const part of PARTS) {
     if (typeof part === 'string') { para.appendChild(document.createTextNode(part)); continue; }
     const i = part;
@@ -141,6 +152,7 @@
     // aria: the handler is on the box. plain: only on the inner label, so an
     // event aimed at the wrapper would never reach it.
     (MODE === 'plain' ? box.querySelector('.lbl') : box).addEventListener('click', e => open(i, box, e));
+    box.setAttribute('data-testid', `dropdown-${i + 1}`);
     para.appendChild(box);
   }
 

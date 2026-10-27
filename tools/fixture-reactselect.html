@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>react-select drop-down</title>
+<style>body{font:20px/1.6 sans-serif;margin:24px} .foot{margin-top:24px}</style></head>
+<body>
+<!-- The live Arabic drop-down question: the real react-select library, the site's class names (classNamePrefix
+     "lib-Select"), the sentence in .lib-dropdown-sentence-container with a bulleted list, and the box inside
+     a <strong>. Loaded from esm.sh, so this page needs the network. -->
+<div class="lib-dropdown-container-wrapper"><div class="lib-dropdown-fields-wrapper"><span><div class="lib-dropdown-sentence-container">
+  <p>قبلَ أنْ تبدأَ تقليمَ أيِّ شجرةٍ، اتَّبعِ الإرشاداتِ الآتيـةَ:</p>
+  <ul><li>امنحْ نفسَكَ بعضَ الدَّقائقِ تقيِّمُ فيها حجمَ وشكلَ الشَّجرةِ.</li><li>حدِّدِ الأفرُعَ الرَّئيسـةَ المكوِّنـةَ لهيكلِ الشَّجرةِ.</li></ul>
+  <p><strong>منْ خصائصِ النَّصِّ السَّابقِ أنَّهُ: <span id="slot"></span></strong></p>
+</div></span></div></div>
+<p class="inst">أختارُ الإجابـةَ الصّحيحـةَ من القائمـة المنسدلة.</p>
+<div class="foot" id="widgets-navigation-container"><button id="submit" class="lib-btn-next" disabled>أُرسلُ إجابتي</button></div>
+<script type="module">
+  import React from 'https://esm.sh/react@18.3.1';
+  import { createRoot } from 'https://esm.sh/react-dom@18.3.1/client';
+  import Select from 'https://esm.sh/react-select@5.8.0?deps=react@18.3.1,react-dom@18.3.1';
+  const OPTIONS = ['إرشاديٌّ', 'سرديٌّ', 'وصفيٌّ'].map(t => ({ value: t, label: t }));
+  window.__sel = null;
+  function App() {
+    const [v, setV] = React.useState(null);
+    return React.createElement('div', { 'data-testid': 'dropdown-1', className: 'lib-dropdown-input-field-container', style: { display: 'inline-block', minWidth: 160 } },
+      React.createElement(Select, {
+        options: OPTIONS, value: v, placeholder: 'أختارُ', isRtl: true, isSearchable: false,
+        classNamePrefix: 'lib-Select', className: 'lib-dropdown-field-wrapper', instanceId: 3,
+        onChange: o => { setV(o); window.__sel = o.value; document.getElementById('submit').disabled = false; },
+      }));
+  }
+  createRoot(document.getElementById('slot')).render(React.createElement(App));
+  window.__ready = true;
+</script>
+</body></html>

@@ -549,7 +549,27 @@
   // of the live list's rows once did; a begun lesson is picked up like a new one.
   const SPEAKING = new URLSearchParams(location.search).get('speaking') === '1';
   const BEGUN = new URLSearchParams(location.search).get('begun') === '1';
+  const CARDS = new URLSearchParams(location.search).get('cards') === '1';
+  // &unassigned=1 (with cards): the first lesson's card says Assigned but opens the live page's
+  // "This is not assigned to you yet." screen, as a route of its own.
+  const UNASSIGNED = new URLSearchParams(location.search).get('unassigned') === '1';
+  window.__unassignedOpens = 0;
+  // &lockafter=1: lesson 1 is assigned, but its last part is not — after two questions, Next shows
+  // the lock screen with only the previous part's button, as the live page did.
+  const LOCKAFTER = new URLSearchParams(location.search).get('lockafter') === '1';
+  window.__lockShown = 0;
+  function showLock() {
+    for (const id of ['stem', 'grid', 'slide', 'splash', 'submit', 'later', 'next', 'done', 'retry', 'readPassage']) { const e = el(id); if (e) e.style.display = 'none'; }
+    document.querySelector('.prompt').style.display = 'none';
+    let box = document.getElementById('notassigned');
+    if (!box) { box = document.createElement('div'); box.id = 'notassigned'; document.body.appendChild(box); }
+    box.setAttribute('data-testid', 'ncle-lock-screen');
+    box.innerHTML = '<div data-testid="ncle-lock-screen-wrapper"><h2 data-testid="ncle-lock-screen-title">This is not assigned to you yet.</h2><p data-testid="ncle-lock-screen-subtitle">Ask your teacher to assign it so you can start it!</p></div><div data-testid="ncle-lock-screen-nav"><button data-testid="ncle-lock-screen-prev-button">Reading: Quoting Meaning</button></div>';
+    box.style.display = '';
+    window.__lockShown++;
+  }
   function showList() {
+    const na = document.getElementById('notassigned'); if (na) na.style.display = 'none';
     for (const id of ['stem', 'grid', 'slide', 'splash', 'submit', 'later', 'next', 'done', 'retry']) el(id).style.display = 'none';
     document.querySelector('.prompt').style.display = 'none';
     el('results').style.display = 'none';
@@ -560,6 +580,38 @@
       rows.push({ title: SPEAKING ? `${k}. Speaking: A Sample Task` : `Lesson ${k}: Skill Practice`, label: BEGUN ? 'Continue' : 'Start', lesson: k });
     }
     el('tasks').innerHTML = '';
+    // &cards=1: the live "All Lessons" page — each lesson a clickable card (a div, not a button), an
+    // "Assigned" tag on the ones the teacher set, and Start / Review at the bottom. Before the lessons:
+    // one that is not assigned (Start) and one assigned and done (Review); neither is to be opened.
+    if (CARDS) {
+      const card = (title, assigned, label, onClick) => {
+        const c = document.createElement('div');
+        c.setAttribute('data-testid', 'core-coursework-alllessons-card');
+        c.style.cssText = 'display:inline-flex; flex-direction:column; width:270px; margin:6px; border:1px solid #ccc; cursor:pointer';
+        c.innerHTML = `<div style="height:40px; background:#eee"></div><div><div>${title}</div></div><hr>` +
+          `<div style="display:flex; padding:8px"><div style="flex:1">${assigned ? '<div data-testid="tag-assigned">Assigned</div>' : ''}</div>` +
+          `<div style="display:flex"><svg width="12" height="12"></svg><div>${label}</div></div></div>`;
+        c.addEventListener('click', onClick);
+        el('tasks').appendChild(c);
+      };
+      card('1. Big Idea: Not Assigned', false, 'Start', () => { window.__decoyClicks++; });
+      card('2. Already Done', true, 'Review', () => { window.__decoyClicks++; });
+      rows.forEach((r, i) => card(`${i + 3}. ${r.title}`, true, r.label, () => {
+        if (UNASSIGNED && r.lesson === 1) {
+          window.__unassignedOpens++;
+          history.pushState(null, '', location.pathname + location.search + '#/lesson/0badf00d-0000-0000/locked');
+          el('home').style.display = 'none';
+          let box = document.getElementById('notassigned');
+          if (!box) { box = document.createElement('div'); box.id = 'notassigned'; document.body.appendChild(box); }
+          box.setAttribute('data-testid', 'ncle-lock-screen'); box.innerHTML = '<div data-testid="ncle-lock-screen-wrapper"><h2 data-testid="ncle-lock-screen-title">This is not assigned to you yet.</h2><p data-testid="ncle-lock-screen-subtitle">Ask your teacher to assign it so you can start it!</p></div><div data-testid="ncle-lock-screen-nav"><button data-testid="ncle-lock-screen-prev-button">Reading: Quoting Meaning</button></div>';
+          box.style.display = '';
+          return;
+        }
+        window.__startClicks++; startLesson(r.lesson, true);
+      }));
+      el('home').style.display = '';
+      return;
+    }
     for (const r of rows) {
       const row = document.createElement('div');
       row.style.cssText = 'display:flex; gap:14px; padding:8px 0; align-items:center';
@@ -604,6 +656,7 @@
     if (!submittedCurrent) return;
     window.__advanced++;
     q++;
+    if (LOCKAFTER && lessonNo === 1 && q === 2) { showLock(); return; }
     if (q >= QUESTIONS.length) { renderTail(); return; }
     if (SLIDE_AFTER && q === 1 && !slidesShown) { slidesShown = true; slidesLeft = SLIDES; }   // slides between the first and second question
     if (SPLASH === 'mid' && q === 1) splashPending = true;                                      // the next activity's title screen

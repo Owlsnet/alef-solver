@@ -323,6 +323,40 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     JSON.stringify(lessonsAsked(st)) === '[3,3,3]' && st.start === 3, `${JSON.stringify(lessonsAsked(st))} start=${st.start}`);
   check('and never touched the site\'s own menu', st.chrome === 0, `chrome=${st.chrome}`);
 
+  // The live "All Lessons" page (build 0.6.37's report): lessons are clickable cards, not buttons,
+  // and the run stopped there saying "nothing left to start". It takes the cards tagged Assigned
+  // that say Start, in order — never an unassigned one, nor one that says Review (done).
+  console.log('\n=== the coursework page as cards, Assigned ones only ===');
+  await fresh('?home=1&chrome=1&course=3&cards=1', {});
+  check('(fixture) the page has five cards and no Start button', await s.eval(`document.querySelectorAll('[data-testid^="core-coursework"]').length === 5 && ![...document.querySelectorAll('#tasks button')].length`) === true);
+  check('and the script finds the first assigned card that says Start', /^3\. Lesson 1/.test(await s.eval(`(() => { const b = window.__alefSolver.findButton('startTask', null); return b ? b.innerText.trim() : ''; })()`)));
+  await fresh('?home=1&chrome=1&course=3&cards=1&end=real', { autoNextLesson: true, maxLessons: 3 });
+  check('the run finished', await run());
+  st = await state();
+  console.log(`  asked per lesson: ${JSON.stringify(lessonsAsked(st))}  cards pressed: ${st.start}  decoys: ${st.decoy}  hud: ${st.hud}`);
+  check('it opens each assigned lesson from its card, in order, and answers all three',
+    JSON.stringify(lessonsAsked(st)) === '[3,3,3]' && st.start === 3, `${JSON.stringify(lessonsAsked(st))} start=${st.start}`);
+  check('and never opened the unassigned card or the one already done', st.decoy === 0, `decoy=${st.decoy}`);
+
+  // A card can say Assigned and still open "This is not assigned to you yet": leave it, take the next.
+  await fresh('?home=1&chrome=1&course=3&cards=1&unassigned=1&end=real', { autoNextLesson: true, maxLessons: 3 });
+  check('the run finished', await run());
+  st = await state();
+  const naOpens = await s.eval('window.__unassignedOpens');
+  console.log(`  asked per lesson: ${JSON.stringify(lessonsAsked(st))}  not-assigned opened: ${naOpens}  hud: ${st.hud}`);
+  check('a card that opens "not assigned to you yet" is left once, and the next lessons are done',
+    naOpens === 1 && JSON.stringify(lessonsAsked(st)) === '[0,3,3]', `opens=${naOpens} ${JSON.stringify(lessonsAsked(st))}`);
+
+  // Partway through a lesson the next part is locked ("This is not assigned to you yet", only a
+  // button back): the run stopped there. It has to leave the lesson and go on to the next one.
+  await fresh('?home=1&chrome=1&course=3&cards=1&lockafter=1&end=real', { autoNextLesson: true, maxLessons: 3 });
+  check('the run finished', await run());
+  st = await state();
+  const locks = await s.eval('window.__lockShown');
+  console.log(`  asked per lesson: ${JSON.stringify(lessonsAsked(st))}  lock screens: ${locks}  hud: ${st.hud}`);
+  check('a lesson whose next part is locked is left, and the next lessons are done',
+    locks === 1 && JSON.stringify(lessonsAsked(st)) === '[2,3,3]', `locks=${locks} ${JSON.stringify(lessonsAsked(st))}`);
+
   // The live list's last task was a speaking lesson ("10. Speaking: …"). It is done like any
   // other, and it was being passed over.
   await fresh('?home=1&course=1&speaking=1', { autoNextLesson: true, maxLessons: 1 });
