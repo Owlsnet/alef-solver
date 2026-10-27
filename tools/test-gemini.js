@@ -28,7 +28,9 @@ vm.runInContext(SRC, ctx, { filename: 'background.js' });
 // A service worker has timers; the sandbox does not. Waits are recorded and then skipped, so the
 // schedule can be checked without sitting through it.
 const pauses = [];
-ctx.setTimeout = (fn, ms) => { pauses.push(ms); return setTimeout(fn, 0); };
+// A guard against a tab that never replies (gwCall's limit) is not a wait: it never fires here.
+ctx.setTimeout = (fn, ms) => { if (ms >= 90000) return 0; pauses.push(ms); return setTimeout(fn, 0); };
+ctx.clearTimeout = t => clearTimeout(t);
 
 let pass = 0, fail = 0;
 const check = (name, ok, detail = '') => {
@@ -691,7 +693,8 @@ const useGemini = (extra = {}) => { store = { provider: 'gemini', geminiKey: KEY
     ctx.gwCacheDrop();
   };
   const gens = () => tabLog.filter(m => m.type === 'gw-generate');
-  const webOld = (over = {}) => ({ cid: 'c_old', rid: 'r_old', rcid: 'rc_old', turns: 5, model: '', account: '1', at: 1, ...over });
+  // No model chosen means the account's quickest (Flash): a kept conversation is for that one.
+  const webOld = (over = {}) => ({ cid: 'c_old', rid: 'r_old', rcid: 'rc_old', turns: 5, model: 'id-flash', account: '1', at: 1, ...over });
 
   useWeb();
   res = await ctx.ask(mcq());
@@ -714,6 +717,103 @@ const useGemini = (extra = {}) => { store = { provider: 'gemini', geminiKey: KEY
   await ctx.ask(mcq());
   check('with the switch off a new conversation is started', gens()[0].chat === null);
   check('and a saved one is left alone', store.geminiWebChat.cid === 'c_old' && store.geminiWebChat.turns === 5, j(store.geminiWebChat));
+
+  // Fewer tokens: in a kept conversation the instructions, and a passage that has not changed, are
+  // not sent again — they are most of every prompt.
+  {
+    const PASSAGE = 'The quick brown fox. '.repeat(30);
+    useWeb();
+    await ctx.ask(mcq({ passage: PASSAGE }));
+    const first = gens()[0].prompt;
+    tabLog = [];
+    await ctx.ask(mcq({ passage: PASSAGE, stem: 'And which is wrong?' }));
+    const second = gens()[0].prompt;
+    check('the first question in a conversation carries the instructions and the passage',
+      /multiple-choice exam/.test(first) && first.includes(PASSAGE), `${first.length} chars`);
+    check('the next one leaves the instructions out', !/multiple-choice exam/.test(second) && /ONLY the JSON object/.test(second), second.slice(0, 120));
+    check('and the unchanged passage', !second.includes(PASSAGE) && /same passage/.test(second), second.slice(0, 160));
+    check('but still asks its own question', /And which is wrong\?/.test(second));
+    check('so it is much shorter', second.length * 2 < first.length, `${first.length} → ${second.length} chars`);
+    tabLog = [];
+    await ctx.ask(mcq({ passage: 'A different passage entirely. '.repeat(20), stem: 'Third?' }));
+    check('a new passage is sent in full', /A different passage entirely/.test(gens()[0].prompt));
+    tabLog = [];
+    await ctx.ask({ kind: 'dropdown', stem: 'Pick', dropdown: { text: 'x [BLANK 1]', menus: [['a', 'b']] }, options: [], images: [], image: null, imageCount: 0 });
+    check('a question of another kind gets its own instructions again', /drop-down menu/.test(gens()[0].prompt), gens()[0].prompt.slice(0, 80));
+  }
+  useWeb();
+  res = await ctx.ask(mcq());
+  check('with no model chosen, the account\'s Flash is used rather than its default', JSON.stringify(gens()[0].model?.id) === '"id-flash"', j(gens()[0].model));
+
+  // After the extension is reloaded, an open Gemini tab still runs the old, cut-off copy of the
+  // script and answers nothing. The run used to sit there saying there was no tab; the script is
+  // now put back into the tab, and the question asked.
+  {
+    useWeb();
+    const realSend = ctx.chrome.tabs.sendMessage;
+    let orphaned = true, injected = 0;
+    ctx.chrome.tabs.sendMessage = async (id, msg) => { if (orphaned) throw new Error('Could not establish connection. Receiving end does not exist.'); return realSend(id, msg); };
+    ctx.chrome.scripting = { executeScript: async ({ target, files }) => { injected++; if (target.tabId === tabId && files.includes('gemini-web.js')) orphaned = false; return []; } };
+    res = await ctx.ask(mcq());
+    check('a Gemini tab cut off by an extension reload is reconnected, and the question answered', res.index === 1 && injected === 1, j({ res, injected }));
+    ctx.chrome.tabs.sendMessage = realSend;
+    delete ctx.chrome.scripting;
+  }
+
+  // The trace: when Gemini answers nothing, the log has to say where it stopped.
+  {
+    useWeb();
+    await ctx.ask(mcq());
+    let log = await ctx.gwLogText({ limit: 300 });
+    const steps = ['tab.found', 'tab.ready', 'session.init', 'session.models', 'ask.model', 'gen.send', 'gen.reply', 'ask.done'];
+    check('a question leaves a trail of every step', steps.every(st => log.includes(st)), steps.filter(st => !log.includes(st)).join(', ') || 'all there');
+    check('with the model it used and how long the reply took', /ask\.model .*picked="Flash"/.test(log) && /gen\.reply ms=\d+/.test(log), log.split('\n').find(l => l.includes('gen.reply')));
+    check('and never the session token itself', !/"T"/.test(log.split('\n').find(l => l.includes('session.init')) || '') && /token="1 chars"/.test(log), log.split('\n').find(l => l.includes('session.init')));
+
+    // A tab that never answers, and no way to reconnect it: the trace says so.
+    useWeb();
+    const realSend = ctx.chrome.tabs.sendMessage;
+    ctx.chrome.tabs.sendMessage = async () => { throw new Error('Receiving end does not exist.'); };
+    res = await ctx.ask(mcq());
+    log = await ctx.gwLogText({ limit: 40 });
+    check('a silent tab is in the trace, with the attempt to reconnect it', /tab\.no-answer/.test(log) && /tab\.(repair-failed|still-silent|none)/.test(log), log.split('\n').slice(-6).join(' | '));
+    ctx.chrome.tabs.sendMessage = realSend;
+  }
+
+  // An account that refuses every follow-up (error 1097, as in the live log): after the first refusal,
+  // later questions go straight to a new conversation instead of losing half a second to it each time.
+  {
+    useWeb({ geminiWebChat: webOld() });
+    genQueue.push({ ok: true, text: '', failure: 'the site reported error 1097', code: 1097 });
+    res = await ctx.ask(mcq());
+    check('a follow-up refused with 1097 is asked again in a new conversation', res.index === 1 && gens().length === 2 && gens()[1].chat === null, j(gens().map(g => g.chat)));
+    check('and the account is marked as one that refuses follow-ups', !!store.geminiWebNoFollowUp?.['1'], j(store.geminiWebNoFollowUp));
+    tabLog = [];
+    res = await ctx.ask(mcq());
+    check('so the next question skips the follow-up and asks once, in a new conversation', res.index === 1 && gens().length === 1 && gens()[0].chat === null, j(gens().map(g => g.chat)));
+    check('with the instructions in it', /multiple-choice exam/.test(gens()[0].prompt));
+    check('and the answer format said last', /ONLY the JSON object — no explanation, no markdown\.$/.test(gens()[0].prompt), gens()[0].prompt.slice(-90));
+  }
+
+  // The live log: 3.8 Flash sent its first two frames and then nothing, twice, for the whole limit.
+  // With a model chosen and no fallback set, the quickest other one is asked; the silent one is told
+  // to give up early (it has someone behind it), and is skipped for a while after.
+  {
+    useWeb({ geminiWebModel: 'gemini-pro', reuseChat: false });
+    genQueue.push({ ok: false, status: 504, detail: 'Gemini: no answer text after 30 s' });
+    res = await ctx.ask(mcq());
+    check('a chosen model that gives no answer is followed by the quickest other one, which answers',
+      res.index === 1 && gens().length === 2 && gens()[0].model?.id === 'id-pro' && gens()[1].model?.id === 'id-flash', j(gens().map(g => g.model?.id)));
+    check('the chosen one was told not to wait long for its first words, having a fallback', gens()[0].noTextMs === 30000 && !gens()[1].noTextMs, j(gens().map(g => g.noTextMs)));
+    check('and is remembered as stalled', !!store.geminiWebStalled?.['id-pro'], j(store.geminiWebStalled));
+    tabLog = [];
+    res = await ctx.ask(mcq());
+    check('so the next question goes straight to the one that answers', res.index === 1 && gens().length === 1 && gens()[0].model?.id === 'id-flash', j(gens().map(g => g.model?.id)));
+    store.geminiWebStalled = { 'id-pro': Date.now() - 31 * 60000 };
+    tabLog = [];
+    res = await ctx.ask(mcq());
+    check('half an hour later the chosen one is given another go, and answering clears it', gens()[0].model?.id === 'id-pro' && !store.geminiWebStalled['id-pro'], j({ m: gens().map(g => g.model?.id), st: store.geminiWebStalled }));
+  }
 
   useWeb({ geminiWebModel: 'gemini-pro', geminiWebChat: webOld({ model: 'id-flash' }) });
   await ctx.ask(mcq());
@@ -872,7 +972,15 @@ const useGemini = (extra = {}) => { store = { provider: 'gemini', geminiKey: KEY
   store.geminiWebModel = 'gemini-ghost';
   tabLog = [];
   res = await ctx.ask(mcq());
-  check('one that is not there even then is reported, after a single new look', /no model called/.test(res.error || '') && count('gw-models') === 1 && gens().length === 0, j({ models: count('gw-models'), e: res.error }));
+  // Not there even after a new look: it is not asked for, and the account's quickest model (the fallback
+  // put behind a chosen model when none was set) answers instead.
+  check('one that is not there even then is not asked for, after a single new look', count('gw-models') === 1 && !gens().some(g => g.model?.id === 'gemini-ghost'), j({ models: count('gw-models') }));
+  check('and the question is answered by the account\'s quickest model instead', res.index === 1 && gens().length === 1 && gens()[0].model?.id === 'id-flash', j({ e: res.error, model: gens()[0]?.model?.id }));
+  store.geminiWebFallbackModel = 'gemini-ghost';
+  tabLog = [];
+  res = await ctx.ask(mcq());
+  check('with a fallback that is not there either, it is reported', /no model called/.test(res.error || '') && gens().length === 0, j({ e: res.error }));
+  delete store.geminiWebFallbackModel;
 
   // Test login proves the login and leaves the first real question warm.
   useWeb({ reuseChat: false });

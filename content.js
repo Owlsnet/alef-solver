@@ -30,6 +30,7 @@
     maxLessons: 100,      // lessons per run when autoNextLesson is on
     slideWaitMs: 45000,   // how long to wait for a greyed-out Next on a slide to unlock (not in Options)
     skipLater: true,      // a question that offers "I'll try later" is skipped with it, not answered
+    autoRecover: true,    // on a failure: ask again, then reload the page and carry on by itself
   };
 
   // What each shortcut was before it could be changed. Options and the popup keep the
@@ -599,7 +600,7 @@
     if (el.tagName === 'TEXTAREA') return true;
     if (el.tagName !== 'INPUT') return false;
     const t = (el.type || 'text').toLowerCase();
-    return t === 'text' || t === 'search' || t === '';
+    return t === 'text' || t === 'search' || t === '' || t === 'number' || t === 'tel';
   }
 
   /** Type into a controlled input the way React will actually notice.
@@ -1107,14 +1108,46 @@
     fireClick(hit && el.contains(hit) ? hit : el);
   }
 
+  /** react-select (the live site's drop-downs: .lib-Select__control, an input #react-select-N-input).
+   *  Its options carry ids react-select-N-option-K, and its menu .…Select__menu, wherever it is drawn. */
+  function reactSelectOf(el) {
+    const input = el.querySelector?.('input[id^="react-select-"][id$="-input"]')
+      || el.closest?.('[class*="-container"]')?.querySelector('input[id^="react-select-"][id$="-input"]');
+    const control = el.matches?.('[class*="Select__control"]') ? el : el.querySelector?.('[class*="Select__control"]') || el;
+    return input ? { input, control, prefix: input.id.replace(/-input$/, '') } : null;
+  }
+  function reactSelectRows(rs) {
+    const byId = [...document.querySelectorAll(`[id^="${rs.prefix}-option-"]`)].filter(visible);
+    if (byId.length) return byId;
+    return [...document.querySelectorAll('[class*="Select__option"]')].filter(visible);
+  }
+
   async function openMenu(el) {
     const before = visibleLeaves();
-    clickAtCenter(el);
-    for (let i = 0; i < 12; i++) {                     // ~1s
-      await sleep(80);
-      if (menuRows(before).length >= 2) {
-        await sleep(80);                               // let an opening animation finish
-        return { rows: menuRows(before), before };
+    const rs = reactSelectOf(el);
+    const rowsNow = () => {
+      if (rs) { const r = reactSelectRows(rs); if (r.length) return r; }
+      const m = menuRows(before);
+      return m.length >= 2 ? m : [];
+    };
+    // A person's click first. react-select opens on mousedown on its control, or on ↓ in its input:
+    // when the click did nothing, those are tried in turn.
+    const ways = [
+      () => clickAtCenter(el),
+      ...(rs ? [
+        () => { const r = rs.control.getBoundingClientRect(); rs.control.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, buttons: 1, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, view: window })); },
+        () => { try { rs.input.focus(); } catch { /* ignore */ }
+                for (const type of ['keydown', 'keyup']) rs.input.dispatchEvent(new KeyboardEvent(type, { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, bubbles: true, cancelable: true })); },
+      ] : []),
+    ];
+    for (const way of ways) {
+      way();
+      for (let i = 0; i < 12; i++) {                   // ~1s each
+        await sleep(80);
+        if (rowsNow().length) {
+          await sleep(80);                             // let an opening animation finish
+          return { rows: rowsNow(), before };
+        }
       }
     }
     return { rows: [], before };
@@ -2028,7 +2061,11 @@
     const match = findMatch();
     const drag = match ? null : findDrag();
     const sort = (match || drag) ? null : findSort();
-    const opts = (match || drag || sort) ? null : findOptions();
+    let opts = (match || drag || sort) ? null : findOptions();
+    // A bulleted list inside a drop-down question's sentence ("ul > li" in .lib-dropdown-sentence-container)
+    // is part of the text, not choices: with a drop-down there to fill, it is a drop-down question.
+    if (opts && opts.root?.closest?.('.lib-dropdown-container-wrapper, .lib-dropdown-fields-wrapper, .lib-dropdown-sentence-container')
+        && [...document.querySelectorAll('.lib-Select__control, [data-testid^="dropdown-"]')].some(visible)) opts = null;
     const optionsRoot = opts?.root || null;
     const passage = findPassage(optionsRoot);
     const stem = findStem(optionsRoot);
@@ -2207,7 +2244,7 @@
 
   const SETTING_KEYS = ['autoSubmit', 'openPassage', 'screenshot', 'answerDelay',
                         'advance', 'cachePassage', 'stepDelay', 'retries', 'devMode', 'hotkeys',
-                        'autoNextLesson', 'maxLessons', 'slideWaitMs', 'skipLater'];
+                        'autoNextLesson', 'maxLessons', 'slideWaitMs', 'skipLater', 'autoRecover'];
 
   async function loadSettings() {
     if (typeof chrome === 'undefined' || !chrome.storage?.local) return;
@@ -2327,8 +2364,8 @@
   function inTaskList(el) {
     if (/\d+\s*tasks?\s*assigned/i.test(taskRowText(el))) return true;
     let n = 0;
-    for (const b of document.querySelectorAll('button, [role="button"], a')) {
-      if (visible(b) && /^(start|continue|resume)\W*$/i.test(txt(b))) n++;
+    for (const b of document.querySelectorAll('button, [role="button"], a, [data-testid$="-btn-navigate"]')) {
+      if (visible(b) && !b.closest('.slick-cloned') && /^(start|continue|resume)\W*$/i.test(txt(b))) n++;
     }
     return n >= 2;
   }
@@ -2350,6 +2387,59 @@
     return '';
   }
 
+  /* ------------------------------------------- the coursework page's lesson cards */
+
+  // The coursework page ("All Lessons", "Assigned") shows each activity as a clickable card — a
+  // div, not a button — with its number and title, an "Assigned" tag when the teacher set it, and
+  // Start / Continue (not done) or Review (done) at the bottom. A run takes the assigned ones that
+  // are not done, in the page's order.
+  const CARD_GO = /^(?:start|continue|resume)$/i;
+  const AR_CARD_GO = /^(?:ابدا|(?:ال)?متابعه|استئناف|استمرار)$/;
+  /** The card a tag sits in: the page marks it core-coursework-…; failing that, the biggest box
+   *  around the tag that still holds only the one tag. */
+  function lessonCard(tag) {
+    const marked = tag.closest('[data-testid^="core-coursework"]');
+    if (marked && marked.querySelectorAll('[data-testid="tag-assigned"]').length === 1) return marked;
+    let card = tag;
+    for (let n = tag.parentElement; n && n !== document.body; n = n.parentElement) {
+      if (n.querySelectorAll('[data-testid="tag-assigned"]').length > 1 || txt(n).length > 300) break;
+      card = n;
+    }
+    return card;
+  }
+  /** A card's "1. Big Idea: …" line, which is what tells one card from another. */
+  const cardTitle = card => {
+    for (const d of card.querySelectorAll('div, span')) {
+      if (!d.children.length && /^\d+\.\s/.test(txt(d))) return txt(d);
+    }
+    return txt(card).slice(0, 60);
+  };
+  /** The card's own word for what a press does: Start, Continue, Review… */
+  const cardAction = card => {
+    const leaves = [...card.querySelectorAll('div, span, button')].filter(d => !d.children.length && txt(d));
+    return leaves.length ? txt(leaves[leaves.length - 1]) : '';
+  };
+  // Lessons a run never starts: the platform's own welcome tour, in either language.
+  const SKIP_LESSONS = /welcome to alef/i;
+  const AR_SKIP_LESSONS = /مرحبا بكم في الف/;
+  const skippedLesson = title => SKIP_LESSONS.test(title) || AR_SKIP_LESSONS.test(arNorm(title));
+  const isLessonCard = el => !!el && el.nodeType === 1 && !!el.querySelector?.('[data-testid="tag-assigned"]') && !el.matches('button, [role="button"], a');
+  /** The first assigned card on the page that is not done yet (nor found to open a lesson already
+   *  done), or null. */
+  function assignedCard() {
+    for (const tag of document.querySelectorAll('[data-testid="tag-assigned"]')) {
+      if (!visible(tag)) continue;
+      const card = lessonCard(tag);
+      const act = cardAction(card);
+      if (!(CARD_GO.test(act) || AR_CARD_GO.test(arNorm(act)))) continue;      // Review: done already
+      if (badRows.has(rowKey(card))) continue;
+      if (skippedLesson(txt(card))) continue;                                  // the welcome tour
+      try { card.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch { /* ignore */ }
+      return card;
+    }
+    return null;
+  }
+
   /* ---------------------------------------------------- a lesson already done */
 
   // The task list can still show a lesson that has just been finished, first among the ones that
@@ -2358,13 +2448,14 @@
   const lessonId = () => (location.hash.match(/\/lesson\/([0-9a-f-]{8,})/i) || [])[1] || null;
   let visitedLessons = new Set();                 // the lessons this run has been in
   const badRows = new Set();                      // list rows that opened a lesson already done (by their text)
-  const rowKey = el => taskRowText(el).replace(/\s*\d+ tasks? assigned.*$/i, '').replace(/\s*(?:start|continue|resume)\s*$/i, '').trim().toLowerCase();
-  const rowTitle = el => taskRowText(el).replace(/\s*\d+ tasks? assigned.*$/i, '').replace(/\s*(?:start|continue|resume)\s*$/i, '').trim().slice(0, 60);
+  const rowKey = el => isLessonCard(el) ? cardTitle(el).toLowerCase() : taskRowText(el).replace(/\s*\d+ tasks? assigned.*$/i, '').replace(/\s*(?:start|continue|resume)\s*$/i, '').trim().toLowerCase();
+  const rowTitle = el => isLessonCard(el) ? cardTitle(el).slice(0, 60) : taskRowText(el).replace(/\s*\d+ tasks? assigned.*$/i, '').replace(/\s*(?:start|continue|resume)\s*$/i, '').trim().slice(0, 60);
   /** What the list offers, for a report: each row's title and its button, and which were found to be
    *  a lesson already done. */
   const startRows = () => [...document.querySelectorAll('button, [role="button"], a')]
     .filter(b => visible(b) && /^(start|continue|resume)\W*$/i.test(txt(b)) && !inPlayerFooter(b))
-    .slice(0, 8).map(b => `${rowTitle(b)} [${txt(b)}]${badRows.has(rowKey(b)) ? ' (already done)' : ''}`);
+    .concat([...document.querySelectorAll('[data-testid="tag-assigned"]')].filter(visible).map(lessonCard))
+    .slice(0, 8).map(b => `${rowTitle(b)} [${isLessonCard(b) ? cardAction(b) : txt(b)}]${badRows.has(rowKey(b)) ? ' (already done)' : ''}`);
 
   /** After a Start pressed on the task list: did it open a lesson this run has already been in?
    *  If so, go back to the list, remember the row, and say so; the caller then takes the next
@@ -2383,6 +2474,94 @@
     return true;
   }
 
+  /* ------------------------------------------------------- a lesson not open to you yet */
+
+  // A card can say Assigned and still open on "This is not assigned to you yet. Ask your teacher to
+  // assign it so you can start it!" — the teacher set the lesson, not this part of it. There is
+  // nothing to do there: leave it, remember the row, and take the next one.
+  const NOT_ASSIGNED = /not assigned to you yet|ask your teacher to assign it/i;
+  const AR_NOT_ASSIGNED = /لم يتم تعيين(?:ه|ها)? لك|اطلب من معلمك تعيين/;
+  /** The element saying so, if the page is showing it. The live page marks it
+   *  data-testid="ncle-lock-screen", whatever language it is in; the words are the fallback. */
+  function notAssigned() {
+    const marked = [...document.querySelectorAll('[data-testid="ncle-lock-screen"], [data-testid^="ncle-lock-screen-wra"]')].find(visible);
+    if (marked) return marked;
+    // The page's own words only: never this script's status line, which may be saying them.
+    const ours = el => !!el.closest('#alef-solver-hud');
+    const root = document.querySelector('main') || document.body;
+    const hudNow = document.getElementById('alef-solver-hud');
+    const t = (root.innerText || '').replace(hudNow && root.contains(hudNow) ? hudNow.innerText || '' : ' ', '');
+    if (!NOT_ASSIGNED.test(t) && !AR_NOT_ASSIGNED.test(arNorm(t))) return null;
+    let best = null;
+    for (const el of root.querySelectorAll('div, p, span, h1, h2, h3, h4, section, [role="dialog"]')) {
+      if (ours(el)) continue;
+      const et = el.innerText || '';
+      if (visible(el) && (NOT_ASSIGNED.test(et) || AR_NOT_ASSIGNED.test(arNorm(et)))) best = el;     // the innermost wins
+    }
+    return best;
+  }
+
+  /** On the lock screen, its own way on to the next part of the lesson, if it has one. Its bar has
+   *  the previous part (ncle-lock-screen-pre…) and, unless this is the last part, the next. */
+  function lockNext() {
+    const bar = [...document.querySelectorAll('[data-testid^="ncle-lock-screen-nav"]')].find(visible);
+    if (!bar) return null;
+    const btns = [...bar.querySelectorAll('button, [role="button"], a')].filter(b => visible(b) && !disabled(b));
+    return btns.find(b => /nex/i.test(b.getAttribute('data-testid') || '')) || null;
+  }
+
+  /** Out of a lesson whose remaining part is locked, back to the list it was opened from: the
+   *  address says which class (…/class/<id>/…) and which list (fromPage=…). Resolves true once
+   *  the list is showing. */
+  async function leaveLockedLesson() {
+    const cls = (location.hash.match(/\/class\/([0-9a-f-]{8,})/i) || [])[1];
+    const from = (location.hash.match(/fromPage=([A-Za-z]+)/) || [])[1] || '';
+    const idBefore = lessonId();
+    if (/home|foryou/i.test(from) || !cls) history.back();
+    else location.hash = `#/classes/${cls}?tab=allLessons`;     // the list whose cards carry the Assigned tag
+    // Out of the lesson is enough: the list may be empty, and the loop says so then.
+    const t0 = Date.now();
+    while (Date.now() - t0 < 10000) {
+      await sleep(250);
+      if (lessonId() !== idBefore && !notAssigned()) break;
+    }
+    if (lessonId() === idBefore) {
+      // Still in the lesson: try the other way out once.
+      history.back();
+      const t1 = Date.now();
+      while ((lessonId() === idBefore || notAssigned()) && Date.now() - t1 < 6000) await sleep(250);
+      if (lessonId() === idBefore || notAssigned()) return false;
+    }
+    await settleList(4000, 800);
+    return true;
+  }
+
+  /** After a press on a row of the list: did it open "not assigned to you yet"? If so, close it or
+   *  go back to the list, remember the row, and resolve true; the caller takes the next one. Waits
+   *  only until the page shows something else it can go on from. */
+  async function leaveUnassigned(key, hrefBefore) {
+    const t0 = Date.now();
+    let box = null;
+    while (!(box = notAssigned()) && Date.now() - t0 < 5000) {
+      if (scrape().kind || skipScreen()) return false;
+      await sleep(200);
+    }
+    if (!box || lockNext()) return false;          // it has a next part: the lesson run goes on to it
+    badRows.add(key);
+    hud('this one is locked for you (the teacher has not opened it) — going back for the next lesson');
+    // Shown in a box over the list: close it. Shown as a page: go back to the list.
+    const dialog = box.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"]');
+    const close = dialog && [...dialog.querySelectorAll('button, [role="button"]')].find(b => visible(b)
+      && /close|dismiss|^ok$|got it|cancel|^×$|^x$|اغلاق|حسنا/i.test(`${txt(b)} ${b.getAttribute('aria-label') || ''}`));
+    if (close) await clickConfirmed(close, { settle: 800 });
+    else if (location.href !== hrefBefore) history.back();
+    else pressEscape();
+    const t1 = Date.now();
+    while ((notAssigned() || !findButton('startTask', null)) && Date.now() - t1 < 8000) await sleep(200);
+    await settleList(4000, 800);
+    return true;
+  }
+
   /** After a press that should open another lesson: wait for the page to show a screen the lesson run
    *  can go on from — a question that is not the last one, or (once the lesson's id in the address has
    *  changed) a slide, an opening screen, a box to skip. A video slide as the first screen was not
@@ -2393,7 +2572,7 @@
       if (stopRun) return false;
       if (scrape().kind && currentQuestionKey() !== before) return true;
       const id = lessonId();
-      if (id && id !== idBefore && (contentScreen() || skipScreen())) return true;
+      if (id && id !== idBefore && (contentScreen() || skipScreen() || notAssigned())) return true;
       await sleep(200);
     }
     return false;
@@ -2414,8 +2593,15 @@
   }
 
   function findButton(kind, optionsRoot, { requireEnabled = true, exclude = null } = {}) {
-    const cands = [...document.querySelectorAll('button, [role="button"], input[type="submit"], a')]
+    // The home page's "Activities to Complete" carousel words its Start / Continue as spans
+    // (data-testid "home-list-start-btn-navigate"); the carousel's cloned slides are copies, not tasks.
+    const sel = kind === 'startTask' ? 'button, [role="button"], input[type="submit"], a, [data-testid$="-btn-navigate"]'
+      : 'button, [role="button"], input[type="submit"], a';
+    const cands = [...document.querySelectorAll(sel)]
       .filter(el => el.tagName !== 'INPUT' || el.type === 'submit')
+      .filter(el => !el.closest('.slick-cloned'))
+      // Only what the teacher assigned: the carousel also offers tests ("Benchmark Test") that are not.
+      .filter(el => !el.matches('[data-testid^="home-list-"]') || /\d+\s*tasks?\s*assigned/i.test(txt(el.closest('[data-testid="home-list-activity-card-navigate"]') || el)))
       .filter(visible);
 
     // On a lesson page the player has its own footer bar (Go Back, Submit Answer, Next, Done, "I'll
@@ -2451,6 +2637,7 @@
           && !inPlayerFooter(el) && inTaskList(el)) s = disabled(el) ? 2 : 15;
       if (s < 0) continue;
       if (kind === 'startTask' && inAttemptCard(el)) continue;     // another go at this lesson, not the next one
+      if (kind === 'startTask' && !inPlayerFooter(el) && skippedLesson(taskRowText(el))) continue;     // the welcome tour
       if (kind === 'startTask' && badRows.size && !inPlayerFooter(el) && badRows.has(rowKey(el))) continue;     // opened a lesson already done
       const t = txt(el);
       // Inside the choices — but never the player's own footer: it is not part of any question, even
@@ -2464,7 +2651,10 @@
       }
     }
     scored.sort((a, b) => b.score - a.score);
-    return (requireEnabled ? scored.find(s => !disabled(s.el)) : scored[0])?.el || null;
+    const found = (requireEnabled ? scored.find(s => !disabled(s.el)) : scored[0])?.el || null;
+    // The coursework page's cards are not buttons: with no Start button, the next assigned card.
+    if (!found && kind === 'startTask') return assignedCard();
+    return found;
   }
 
   /** Is the current question already answered? Used only to resume a
@@ -2631,6 +2821,46 @@
 
   /** The choice the page still shows as picked, for a question we meet already
    *  marked wrong (the run was started, or resumed, after the answer went in). */
+  /** Is the lesson player showing its own loading spinner ("Loading…") where the activity will be? */
+  function activityLoading() {
+    for (const el of document.querySelectorAll('[data-testid="spinner-container"]')) if (visible(el)) return true;
+    return [...document.querySelectorAll('p, span, div')].some(el => !el.children.length && /^loading(?:\.\.\.|…)?$/i.test(txt(el)) && visible(el));
+  }
+
+  /** On a retry: a box the page marked right last time keeps that answer, whatever the model now says.
+   *  A model asked again tends to change everything, and turned right boxes wrong. */
+  function keepMarkedRight(words, tried, allowed = () => true) {
+    const last = (tried || [])[tried.length - 1];
+    if (!last?.blanks || last.blanks.length !== words.length) return words;
+    return words.map((w, i) => {
+      const b = last.blanks[i];
+      return b.mark === 'right' && b.value && allowed(b.value, i) ? b.value : w;
+    });
+  }
+
+  /** How the page marked one blank after a wrong answer: 'right', 'wrong', or '' when it does not say.
+   *  Looked for on the box and the few elements around it — a class (lib-correct, is-incorrect, error,
+   *  success…), aria-invalid, or a small icon labelled correct / incorrect beside it. */
+  const MARK_WRONG = /(?:^|[\s_-])(?:in-?correct|wrong|error|invalid|danger|fail(?:ed)?)(?:$|[\s_-])/i;
+  // Only words that say "this answer is right": "right" and "valid" are also layout and form words
+  // (text-right, pull-right), and taking one for a mark would lock a wrong answer in.
+  const MARK_RIGHT = /(?:^|[\s_-])(?:correct|success)(?:$|[\s_-])/i;
+  function blankMark(el) {
+    let node = el;
+    for (let i = 0; node && i < 4 && node !== document.body; i++, node = node.parentElement) {
+      if (node.getAttribute?.('aria-invalid') === 'true') return 'wrong';
+      const cls = `${typeof node.className === 'string' ? node.className : node.className?.baseVal || ''} ${node.getAttribute?.('data-state') || ''} ${node.getAttribute?.('data-status') || ''}`;
+      if (MARK_WRONG.test(cls)) return 'wrong';
+      if (MARK_RIGHT.test(cls) && !/incorrect/i.test(cls)) return 'right';
+      for (const ic of node.querySelectorAll?.(':scope > [aria-label], :scope > [title], :scope > svg') || []) {
+        const l = `${ic.getAttribute('aria-label') || ''} ${ic.getAttribute('title') || ''} ${ic.getAttribute('data-testid') || ''}`;
+        if (/incorrect|wrong|خطأ/i.test(l)) return 'wrong';
+        if (/\bcorrect\b|صحيح/i.test(l)) return 'right';
+      }
+    }
+    return '';
+  }
+
   function pickedBeforeRetry() {
     const p = scrape();
     if (p.kind === 'choice' && p.multi) {
@@ -2640,11 +2870,14 @@
       const i = p.options.findIndex(o => selected(o.el));
       if (i >= 0) return { label: `${'ABCDEFGHIJ'[i]}. ${p.options[i].text}` };
     } else if (p.kind === 'dropdown') {
-      const shown = p.dropdown.blanks.map(b => b.shows).filter(t => t && !PLACEHOLDER.test(t));
-      if (shown.length) return { label: shown.join(' / ') };
+      // Each box's value and how the page marked it, so a box it called right is kept on the retry.
+      const blanks = p.dropdown.blanks.map(b => ({ value: b.shows && !PLACEHOLDER.test(b.shows) ? b.shows : '', mark: blankMark(b.el) }));
+      const shown = blanks.map(b => b.value).filter(Boolean);
+      if (shown.length) return { label: shown.join(' / '), blanks };
     } else if (p.kind === 'cloze') {
-      const typed = p.cloze.blanks.map(b => b.value).filter(Boolean);
-      if (typed.length) return { label: typed.join(' / ') };
+      const blanks = p.cloze.blanks.map(b => ({ value: b.value || '', mark: blankMark(b.el) }));
+      const typed = blanks.map(b => b.value).filter(Boolean);
+      if (typed.length) return { label: typed.join(' / '), blanks };
     }
     return { label: '(not recorded: it was given before this run started)' };
   }
@@ -2754,6 +2987,9 @@
       try { w.postMessage({ __alefCfg: cfg }, '*'); } catch { /* ignore */ }
     }
   }
+
+  // A reload this script asked for, to get a run going again: carry it on.
+  if (typeof window !== 'undefined') setTimeout(() => { resumeAfterReload().catch(e => console.warn('[alef-solver] resume', e)); }, 300);
 
   if (typeof window !== 'undefined' && IS_TOP) {
     // Child frames relay their status up so the progress stays visible even
@@ -2872,6 +3108,7 @@
       type: 'ask',
       payload: {
         kind: p.kind,
+        subject: currentSubject(),
         stem: p.stem,
         passage,
         options: p.options.map(o => ({ text: o.text })),
@@ -2997,11 +3234,12 @@
         hud(`✗ model gave ${picks.length} picks for ${menus.length} drop-downs`);
         return { ok: false, reason: 'dropdown-count', picks, menus };
       }
-      const words = picks.map((ix, i) => menus[i][ix]);
+      let words = picks.map((ix, i) => menus[i][ix]);
       if (words.some(w => w == null)) {
         hud('✗ a pick was out of range');
         return { ok: false, reason: 'dropdown-range', picks, menus };
       }
+      words = keepMarkedRight(words, tried, (w, i) => menus[i].some(o => normKey(o) === normKey(w)));
 
       hud(`→ ${words.join(' / ')} · ${ms}ms${blind}${speedNote}`);
       console.log('[alef-solver]', ans.why, ans.raw);
@@ -3021,8 +3259,9 @@
 
     /* ---- fill in the blanks ---- */
     if (p.kind === 'cloze') {
-      const words = ans.words || [];
+      let words = ans.words || [];
       if (!words.length) { hud('✗ no blanks returned'); return { ok: false, reason: 'cloze-empty' }; }
+      words = keepMarkedRight(words, tried);
 
       hud(`→ ${words.join(' / ')} · ${ms}ms${blind}${speedNote}`);
       console.log('[alef-solver]', ans.why, ans.raw, ans.mismatch || '');
@@ -3230,8 +3469,9 @@
         : key ? `the task list — starting "${rowTitle(el)}"`
         : `opening the next lesson ("${txt(el)}")`);
       if (how === 'finish' || how === 'submit' || how === 'rate') used.add(el);
-      pressed.push(key ? `${txt(el)} (${rowTitle(el)})` : txt(el));
+      pressed.push(key ? `${isLessonCard(el) ? cardAction(el) : txt(el)} (${rowTitle(el)})` : txt(el));
       const idBefore = lessonId();                      // the lesson this press leaves (none, on the task list)
+      const hrefBefore = location.href;
       const c = await clickConfirmed(el, { settle: 1500 });
       let landed = c.ok;
       if (!landed && how === 'back') {
@@ -3261,6 +3501,7 @@
       }
       if (how === 'finish' || how === 'submit') continue;     // the page moves on a step; look again
       if (key && await reopenedDone(key)) { atCoursework = true; continue; }     // a lesson already done: another row
+      if (key && await leaveUnassigned(key, hrefBefore)) { atCoursework = true; continue; }     // not open to you yet: another row
       // Opened — whatever its first screen is: a question, but also a video slide with a Next, or an
       // opening screen with a Start. The lesson run itself goes on from any of those.
       if (await waitForOpened(before, idBefore, 10000)) return { ok: true, pressed };
@@ -3270,23 +3511,35 @@
 
   /** One press, the whole lesson: submit, Next, repeat until it runs out. With
    *  autoNextLesson on, press Done and go on to the next lesson too, up to maxLessons. */
-  async function solveLesson() {
+  async function solveLesson({ lessons: resumedLessons, skip: skipLessons = [] } = {}) {
     if (busy) return hud('already running');
     busy = true;
     stopRun = false;
+    reloading = false;
+    // Started by hand: no reloads behind it. Picked up after a reload: the count goes on.
+    if (!resumedLessons) recoverSave(null);
 
     await loadSettings();
     await pushSettingsToFrames();
 
     let n = 0;
-    let lessons = 1;                          // the lesson this run is in
+    let lessons = resumedLessons || 1;        // the lesson this run is in
     visitedLessons = new Set();               // which lessons this run has been in, to tell a done one from a new one
     badRows.clear();
     if (lessonId()) visitedLessons.add(lessonId());
+    for (const id of skipLessons) visitedLessons.add(id);     // lessons given up earlier in this run: their cards are passed over
+    // A crash or a reload from here on picks the run up again. Picked up after a reload, the failures in
+    // a row still count: only a question that goes through starts them again from nothing.
+    recoverProgress(lessons, { reset: !resumedLessons });
     const maxLessons = Math.max(1, Number(CFG.maxLessons) || 1);
     const cap = MAX_QUESTIONS * (CFG.autoNextLesson ? maxLessons : 1);
     const plural = k => `${k} lesson${k === 1 ? '' : 's'}`;
     const MAX_SLIDES = 20;                    // screens with no question, in a row, before giving up
+    /** Something went wrong: reload and carry on if that is allowed, otherwise stop and say so. */
+    const fail = async (stage, message, detail) => {
+      if (await recoverByReload(n, stage, message, detail, lessons)) return;
+      await failRun(n, stage, message, detail);
+    };
     console.log('[alef-solver] run started', { cachePassage: CFG.cachePassage, advance: CFG.advance, autoNextLesson: CFG.autoNextLesson, maxLessons });
 
     /** The lesson's last screen is done and the page offers Finish. Pressing it ends the
@@ -3308,6 +3561,7 @@
       if (r.ok) {
         lessons++;
         if (lessonId()) visitedLessons.add(lessonId());
+        recoverProgress(lessons);
         hud(`lesson ${lessons} opened`);
         await sleep(CFG.stepDelay);
         return 'next';
@@ -3315,13 +3569,15 @@
       if (r.noNext) {
         // The end of the course, or a button this does not know. It cannot tell which,
         // so say both and keep the evidence.
+        // Not at the list (no way on appeared after Done): leave the lesson for the list and the next one.
+        if (!r.atCoursework && await recoverByReload(n, 'next-lesson', r.why, { lessons, pressed: r.pressed, buttons: r.buttons }, lessons, { abandon: true })) return 'stop';
         await saveReport('next-lesson', r.why, { lessons, pressed: r.pressed, rows: r.rows, back: r.back, nextLesson: r.nextLesson, start: r.start, submit: r.submit, finish: r.finish, buttons: r.buttons }, n);
         hud(r.atCoursework
           ? `✓ ${plural(lessons)} done. Back at the coursework page with nothing left to start (${reportHint()} if there should be)`
           : `✓ ${plural(lessons)} done. No next lesson button appeared, so I stopped (${reportHint()} if there should have been one)`, true);
         return 'stop';
       }
-      await failRun(n, 'next-lesson', r.why, { lessons, pressed: r.pressed, rows: r.rows, back: r.back, buttons: r.buttons });
+      await fail('next-lesson', r.why, { lessons, pressed: r.pressed, rows: r.rows, back: r.back, buttons: r.buttons });
       return 'stop';
     };
 
@@ -3341,15 +3597,49 @@
             const before = currentQuestionKey();
             hud(`the page offers "${txt(skipBtn)}" — pressing it`);
             const k = await clickConfirmed(skipBtn, { settle: 1500 });
-            if (!k.ok) { await failRun(n, 'skip', `"${txt(skipBtn)}" was pressed but nothing changed`, { label: txt(skipBtn) }); break lessonLoop; }
+            if (!k.ok) { await fail('skip', `"${txt(skipBtn)}" was pressed but nothing changed`, { label: txt(skipBtn) }); break lessonLoop; }
             if (!(await waitAfterSkip(before, 9000))) {
-              await saveReport('after-skip', 'no screen appeared after "I\'ll try later"', { buttons: buttonLabels(), next: describeNav('next') }, n);
+              if (await recoverByReload(n, 'after-skip', 'no screen appeared after "I\'ll try later"', { buttons: buttonLabels(), next: describeNav('next') }, lessons)) break lessonLoop;
               hud(`⚠ nothing new appeared after skipping a question (${reportHint()})`, true);
               break lessonLoop;
             }
             await sleep(CFG.stepDelay);
             found = await waitForQuestion(1500);
             continue;
+          }
+          // "This is not assigned to you yet": the lesson is assigned, this part of it is not. Go on to
+          // the next part if the screen offers it; otherwise the rest is locked — on to the next lesson.
+          if (notAssigned()) {
+            const nx = lockNext();
+            if (nx) {
+              hud(`this part is locked for you — on to the next ("${txt(nx)}")`);
+              const k = await clickConfirmed(nx, { settle: 1500 });
+              if (k.ok) { await sleep(CFG.stepDelay); found = await waitForQuestion(1500); continue; }
+            }
+            if (!CFG.autoNextLesson) {
+              hud(`✓ ${n} answered — the rest of this lesson is locked for you, so there is nothing more to do here (switch on "Go to the next lesson when done" to go on to the next one)`, true);
+              break lessonLoop;
+            }
+            if (lessons >= maxLessons) { hud(`✓ ${plural(lessons)} done — that is the limit set in Options. Stopping.`, true); break lessonLoop; }
+            hud('the rest of this lesson is locked for you — back to the list for the next lesson');
+            if (lessonId()) visitedLessons.add(lessonId());          // its card still says Continue: not again
+            if (!(await leaveLockedLesson())) {
+              await fail('locked', 'could not get back to the list from a part not assigned yet', { buttons: buttonLabels() });
+              break lessonLoop;
+            }
+            lessons++;
+            found = false;
+            continue;
+          }
+          // The activity is still loading (the player's own "Loading…" spinner): wait for it rather than
+          // calling the screen empty.
+          if (activityLoading()) {
+            hud('the activity is still loading — waiting…');
+            const t0 = Date.now();
+            while (activityLoading() && Date.now() - t0 < 30000 && !stopRun) await sleep(300);
+            if (stopRun) break lessonLoop;
+            found = await waitForQuestion(2500);
+            if (found || !activityLoading()) { slides--; continue; }
           }
           const screen = contentScreen();
           if (!screen) { found = await waitForQuestion(4500); break; }     // still loading, or not something it can read
@@ -3367,9 +3657,9 @@
             }
             if (stopRun) break lessonLoop;
             if (!scrape().kind && !findButton('next', null) && !findButton('finish', null)) {
-              await saveReport('slide-locked', 'Next stayed greyed out on a slide', {
+              if (await recoverByReload(n, 'slide-locked', 'Next stayed greyed out on a slide', {
                 waitedSeconds: Math.round((Date.now() - t0) / 1000), next: describeNav('next'), buttons: buttonLabels(),
-              }, n);
+              }, lessons)) break lessonLoop;
               hud(`⚠ Next stayed greyed out for ${Math.round((Date.now() - t0) / 1000)} s — the slide may need something clicked first (${reportHint()})`, true);
               break lessonLoop;
             }
@@ -3377,22 +3667,29 @@
             slides--;                                  // waiting is not a slide skipped
             continue;
           }
-          if (slides >= MAX_SLIDES) { hud(`⚠ ${MAX_SLIDES} slides in a row with no question — stopping`, true); break lessonLoop; }
+          if (slides >= MAX_SLIDES) {
+            if (await recoverByReload(n, 'slides', `${MAX_SLIDES} slides in a row with no question`, { buttons: buttonLabels() }, lessons, { abandon: true })) break lessonLoop;
+            hud(`⚠ ${MAX_SLIDES} slides in a row with no question — stopping`, true);
+            break lessonLoop;
+          }
           hud(screen.splash ? `the activity's opening screen — pressing "${txt(screen.next)}"`
             : screen.rating ? `the lesson's rating box — pressing "${txt(screen.next)}"`
-            : screen.coursework ? `the task list — starting "${taskRowText(screen.next).replace(/\s*\d+ tasks? assigned.*$/i, '').slice(0, 60)}"`
+            : screen.coursework ? `the task list — starting "${rowTitle(screen.next)}"`
             : `a slide with no question — Next (${slides + 1})`);
           const taskKey = screen.coursework ? rowKey(screen.next) : '';
+          const hrefBefore = location.href;
           const k = await clickConfirmed(screen.next, { settle: 1500 });
-          if (!k.ok) { await failRun(n, 'next', 'Next was pressed on a slide but nothing changed', { label: txt(screen.next), rows: startRows() }); break lessonLoop; }
+          if (!k.ok) { await fail('next', 'Next was pressed on a slide but nothing changed', { label: txt(screen.next), rows: startRows() }); break lessonLoop; }
           if (taskKey && await reopenedDone(taskKey)) { found = false; continue; }     // a lesson already done: the next row
+          if (taskKey && await leaveUnassigned(taskKey, hrefBefore)) { found = false; continue; }     // not open to you yet: the next row
           await sleep(CFG.stepDelay);
           found = await waitForQuestion(1500);
         }
         if (!found) {
           // Keep what the page looked like: without this, "Copy last report" handed back an older
           // report from some other page, and a question this cannot read was never seen.
-          await saveReport('no-question', 'no question found on this screen of the lesson', { answered: n, why: whyNone(), buttons: buttonLabels() }, n);
+          // A page that did not finish loading looks just like this: reload and see.
+          if (await recoverByReload(n, 'no-question', 'no question found on this screen of the lesson', { answered: n, why: whyNone(), buttons: buttonLabels() }, lessons)) break;
           hud(`⚠ no question found after ${n} — stopping (${reportHint()})`, true);
           break;
         }
@@ -3405,7 +3702,32 @@
           next = findButton('next', null);
         } else {
           hud(`#${n + 1} · reading page…`);
-          const a = await answerQuestion(true);
+          let a = await answerQuestion(true);
+          // The service failed, the reply could not be read, a drop-down would not open, the press did
+          // not register: close whatever is open, wait a little longer each time, and ask again.
+          const failedAnswer = x => !x.skipped && !x.wrong && !x.stuck && !x.r.stopped
+            && (!x.r.ok || (CFG.autoSubmit && CFG.advance && !(x.r.commit || {}).submitted));
+          for (let tries = 0; failedAnswer(a) && canRecover() && tries < RECOVER_TRIES && !stopRun && !isGraded(); tries++) {
+            const why = a.r.reason || a.r.error || (a.r.commit || {}).error || 'could not answer';
+            hud(`#${n + 1} ${String(why).slice(0, 90)} — asking again (${tries + 1}/${RECOVER_TRIES})`);
+            pressEscape();
+            await sleep(RECOVER_SETTLE);
+            if (stopRun || !scrape().kind) break;      // stopped, or the page moved on meanwhile
+            a = await answerQuestion(true);
+          }
+          if (stopRun) { hud(`stopped after ${n}`); break; }
+          // It went in after all, just not the way the press was checked: carry on as answered.
+          if (failedAnswer(a) && isGraded()) a = { ...a, r: { ...a.r, ok: true, commit: { ...(a.r.commit || {}), submitted: true } } };
+          // Still failing, and the page offers "I'll try later": take it rather than stopping.
+          if (failedAnswer(a) && canRecover() && scrape().kind) {
+            const skipBtn = findButton('skip', null);
+            if (skipBtn) {
+              hud(`#${n + 1} would not go through — pressing "${txt(skipBtn)}" and carrying on`);
+              const k = await clickConfirmed(skipBtn, { settle: 1500 });
+              if (k.ok) a = { r: { ok: true }, tried: a.tried, skipped: true };
+            }
+          }
+          if (!failedAnswer(a) && !a.wrong && !a.stuck) recoverProgress(lessons);
           const r = a.r;
           const c = r.commit || {};
           if (a.skipped) {
@@ -3417,7 +3739,7 @@
               break;
             }
             if (!where) {
-              await saveReport('after-skip', 'no question or slide appeared after "I\'ll try later"', { buttons: buttonLabels(), next: describeNav('next') }, n);
+              if (await recoverByReload(n, 'after-skip', 'no question or slide appeared after "I\'ll try later"', { buttons: buttonLabels(), next: describeNav('next') }, lessons)) break;
               hud(`⚠ nothing new appeared after skipping #${n + 1} (${reportHint()})`, true);
               break;
             }
@@ -3426,11 +3748,25 @@
           }
           // A wrong answer that cannot be retried ends the run, and says so — not
           // "no Next button", which would read as a lesson that finished.
-          if (a.wrong) { await giveUpOnWrong(n, a); break; }
-          if (a.stuck) { await failRun(n, 'retry', a.stuck, { tried: a.tried }); break; }
+          if (a.wrong) {
+            // Still wrong after every try: move on the way the page lets one (Next, "I'll try later"),
+            // and failing that leave the lesson for the next one — never sit there.
+            if (canRecover()) {
+              const way = findButton('next', null) || findButton('skip', null);
+              if (way) {
+                hud(`#${n + 1} still wrong after ${a.tried.length} tries — moving on ("${txt(way)}")`);
+                const k = await clickConfirmed(way, { settle: 1500 });
+                if (k.ok && await waitForNextScreen(key, 9000)) { await sleep(CFG.stepDelay); continue; }
+              }
+              if (await recoverByReload(n, 'wrong', `still wrong after ${a.tried.length} tries`, { tried: a.tried }, lessons, { abandon: true })) break;
+            }
+            await giveUpOnWrong(n, a);
+            break;
+          }
+          if (a.stuck) { await fail('retry', a.stuck, { tried: a.tried }); break; }
           if (r.stopped) break;                     // Stop was pressed while waiting out a rate limit; already said
           if (!r.ok) {
-            await failRun(n, 'answer', r.reason || 'could not answer', r);
+            await fail('answer', r.reason || 'could not answer', r);
             break;
           }
 
@@ -3442,7 +3778,7 @@
           // Say what actually went wrong. "Not graded" would hide a click that
           // never landed, which is the only useful fact.
           if (!c.submitted) {
-            await failRun(n, 'submit', c.error || 'submit did not register', c);
+            await fail('submit', c.error || 'submit did not register', c);
             break;
           }
 
@@ -3467,7 +3803,7 @@
           }
           // Keep what the page looked like: this stop used to leave no report, so "Copy last report"
           // handed back one from some other page.
-          await saveReport('no-next', 'answered, but there is no Next button, no Finish, and no new question', { answered: n + 1, next: describeNav('next'), finish: describeNav('finish'), buttons: buttonLabels() }, n);
+          if (await recoverByReload(n, 'no-next', 'answered, but there is no Next button, no Finish, and no new question', { answered: n + 1, next: describeNav('next'), finish: describeNav('finish'), buttons: buttonLabels() }, lessons, { abandon: true })) break;
           hud(`✓ #${n + 1} answered; no Next button, so nothing more to do here (${reportHint()} if the lesson had more).`, true);
           break;
         }
@@ -3475,14 +3811,14 @@
         hud(`#${n + 1} done → next`);
         const nx = await clickConfirmed(next, { settle: 1500 });
         if (!nx.ok) {
-          await failRun(n, 'next', 'Next button clicked but nothing changed', { label: txt(next) });
+          await fail('next', 'Next button clicked but nothing changed', { label: txt(next) });
           break;
         }
         // The next screen is a question, or one with no question that the lesson goes on from.
         if (!(await waitForNextScreen(key, 9000))) {
           // The lesson is over, or a screen came up that this does not know. It cannot
           // tell which, so keep what the page looked like in case it matters.
-          await saveReport('after-next', 'no question or slide appeared after Next', { answered: n + 1, next: describeNav('next'), finish: describeNav('finish'), buttons: buttonLabels() }, n);
+          if (await recoverByReload(n, 'after-next', 'no question or slide appeared after Next', { answered: n + 1, next: describeNav('next'), finish: describeNav('finish'), buttons: buttonLabels() }, lessons, { abandon: true })) break;
           hud(`✓ no further questions · ${n + 1} completed (${reportHint()} if the lesson had more)`, true);
           break;
         }
@@ -3492,9 +3828,11 @@
       if (n >= cap) hud(`⚠ stopped at the ${cap}-question cap`);
       console.log('[alef-solver] run finished after', n);
     } catch (e) {
-      hud(`✗ ${e.message || e}`);
       console.error('[alef-solver]', e);
+      if (!(await recoverByReload(n, 'exception', String(e.message || e), { stack: String(e.stack || '').slice(0, 600) }, lessons))) hud(`✗ ${e.message || e}`);
     } finally {
+      // Over for good, unless a reload is on its way to carry it on.
+      if (!reloading) recoverSave(null);
       busy = false;
       stopRun = false;
     }
@@ -3562,7 +3900,7 @@
         if (key !== prevKey) return 'question';
         if (findButton('finish', null)) return 'finish';
       } else {
-        if (contentScreen()) return 'slide';
+        if (contentScreen() || notAssigned()) return 'slide';
         if (key !== prevKey) return 'screen';
       }
     }
@@ -3577,7 +3915,7 @@
       await sleep(200);
       const p = scrape();
       if (p.kind) { if (currentQuestionKey() !== prevKey) return 'question'; }
-      else if (contentScreen() || skipScreen()) return 'slide';
+      else if (contentScreen() || skipScreen() || notAssigned()) return 'slide';     // the lock screen too: the loop leaves it
     }
     return null;
   }
@@ -3936,6 +4274,116 @@
    *  a user gesture, which a background run doesn't have — so the report goes
    *  to extension storage and the popup's "Copy last failure report" button
    *  (a real click) puts it on the clipboard. */
+  /* ------------------------------------------------- getting going again by itself */
+
+  // A run that hits trouble — the model service failing, a drop-down that never opens, a press that
+  // does nothing, the page itself falling over — first asks again on the same question, then reloads
+  // the page and picks up where it was, without anyone pressing anything. What it is doing is kept in
+  // sessionStorage, which outlives a reload of the tab and nothing else. Only inside the extension:
+  // a page the script was put into by hand would not get it back after a reload.
+  const RECOVER_KEY = 'alefSolverResume';
+  const RECOVER_RELOADS = 3;           // reloads on one lesson with nothing answered, before it is given up for the next
+  const RECOVER_ABANDONS = 5;          // lessons given up in a row, with nothing answered, before stopping for good
+  const RECOVER_TRIES = 3;             // times a failed question is asked again before anything bigger
+  const RECOVER_SETTLE = 250;          // only long enough for a closed menu to go before asking again
+  const canRecover = () => { try { return !!CFG.autoRecover && !!chrome.runtime?.id; } catch { return false; } };
+  const recoverState = () => { try { return JSON.parse(sessionStorage.getItem(RECOVER_KEY) || 'null'); } catch { return null; } };
+  const recoverSave = v => { try { v ? sessionStorage.setItem(RECOVER_KEY, JSON.stringify(v)) : sessionStorage.removeItem(RECOVER_KEY); return true; } catch { return false; } };
+  /** The run is alive and getting somewhere: note it, so a tab that crashes or is reloaded picks the
+   *  run up again (resumeAfterReload), and start the count of failures in a row again from nothing. */
+  const recoverProgress = (lessons, { reset = true } = {}) => {
+    if (!canRecover()) return;
+    const st = recoverState() || {};
+    recoverSave({ ...st, active: true, at: Date.now(), ...(reset ? { reloads: 0, abandons: 0 } : {}), ...(lessons ? { lessons } : {}) });
+  };
+  /** Where the run goes when it gives a lesson up: the class's All Lessons page, read off the address. */
+  const coursePageHash = () => {
+    const cls = (location.hash.match(/\/class\/([0-9a-f-]{8,})/i) || [])[1];
+    return cls ? `#/classes/${cls}?tab=allLessons` : '#/home';
+  };
+  // Which page load this is, the same for every frame of it: a claim on the run older than this is
+  // left over from before the reload.
+  const PAGE_LOAD = (() => { try { return window.top.performance.timeOrigin; } catch { return performance.timeOrigin; } })();
+  const FRAME_ID = Math.random().toString(36).slice(2);
+  let reloading = false;               // a reload is under way: the run ending is not the run being over
+
+  /** Close whatever is open (a drop-down's menu, a popover) before asking again. */
+  function pressEscape() {
+    for (const t of [document.activeElement, document.body]) {
+      if (!t) continue;
+      for (const type of ['keydown', 'keyup']) t.dispatchEvent(new KeyboardEvent(type, { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+    }
+  }
+
+  /** Keep the report, reload the page, and let resumeAfterReload() carry the run on. Resolves true
+   *  when the reload is under way; false when it may not (switched off, stopped, or too many already). */
+  async function recoverByReload(n, stage, message, detail, lessons, { abandon = false } = {}) {
+    await saveReport(stage, message, detail, n);
+    if (!canRecover() || stopRun) return false;
+    // Giving a lesson up means going on to the next one, which only a run that does that may do.
+    if (abandon && !CFG.autoNextLesson) return false;
+    const st = recoverState() || {};
+    let reloads = (st.reloads || 0) + 1, abandons = st.abandons || 0;
+    const skip = Array.isArray(st.skip) ? st.skip : [];
+    let target = null;
+    if (abandon || reloads > RECOVER_RELOADS) {
+      if (!CFG.autoNextLesson) { recoverSave(null); return false; }
+      // Reloading has not helped (or there is no way on in this lesson): leave it for the next one.
+      const id = lessonId();
+      if (id && !skip.includes(id)) skip.push(id);
+      abandons++;
+      reloads = 0;
+      if (abandons > RECOVER_ABANDONS) { recoverSave(null); return false; }
+      target = coursePageHash();
+    }
+    if (!recoverSave({ pending: true, active: true, at: Date.now(), reloads, abandons, skip, lessons: target ? lessons + 1 : lessons, why: message })) return false;
+    reloading = true;
+    hud(target
+      ? `⟳ #${n + 1} ${message} — leaving this lesson and going on to the next one`
+      : `⟳ #${n + 1} ${message} — reloading the page and carrying on (${reloads}/${RECOVER_RELOADS})`, true);
+    await sleep(RECOVER_SETTLE);
+    // A frame reloads only itself; it is the whole page that has to come back.
+    try { if (target) window.top.location.hash = target; } catch { /* cross-origin frame: reload where it is */ }
+    try { window.top.location.reload(); } catch { location.reload(); }
+    return true;
+  }
+
+  /** After a reload this run asked for: wait for the page to show something a run can go on from,
+   *  and go on. Every frame looks; the first to find its screen takes the job. */
+  async function resumeAfterReload() {
+    // A reload this run asked for (pending), or a run that was going when the tab crashed or was
+    // reloaded (active, and heard from in the last half hour).
+    const live = st => !!st && (st.pending || st.active) && Date.now() - (st.at || 0) < 30 * 60000;
+    const claimedHere = st => st?.claim && st.claim.at >= PAGE_LOAD;
+    if (!live(recoverState())) return;
+    await loadSettings();
+    if (!canRecover()) { recoverSave(null); return; }
+    const t0 = Date.now();
+    while (Date.now() - t0 < 40000) {
+      const cur = recoverState();
+      if (!live(cur) || claimedHere(cur)) return;      // Stop was pressed, or another frame took it
+      if (!busy && (scrape().kind || skipScreen() || contentScreen() || notAssigned() || findButton('finish', null))) {
+        recoverSave({ ...cur, pending: false, active: true, at: Date.now(), claim: { by: FRAME_ID, at: Date.now() } });
+        await sleep(50);
+        if (recoverState()?.claim?.by !== FRAME_ID) return;     // two frames at once: the other one won
+        hud('⟳ page reloaded — carrying on');
+        solveLesson({ lessons: cur.lessons || 1, skip: cur.skip || [] });
+        return;
+      }
+      await sleep(250);
+    }
+    // Nothing to go on from came up: reload again, or give the lesson up — the same as any other failure.
+    if (IS_TOP) {
+      const cur = recoverState();
+      if (!live(cur) || claimedHere(cur)) return;
+      recoverSave({ ...cur, claim: { by: FRAME_ID, at: Date.now() } });
+      if (!(await recoverByReload(0, 'resume', 'nothing to carry on from came up after the reload', { buttons: buttonLabels(), why: whyNone() }, cur.lessons || 1))) {
+        recoverSave(null);
+        hud('⚠ the page was reloaded to recover, but nothing to carry on from came up — stopped', true);
+      }
+    }
+  }
+
   async function failRun(n, stage, message, detail) {
     hud(`⚠ #${n + 1} ${message} — stopped. Report saved: ${reportHint()}`, true);
     console.warn('[alef-solver]', stage, message, detail);
@@ -3961,6 +4409,14 @@
     let dumped = '(dump failed)';
     try { dumped = buildDump().text; } catch (e) { dumped = `(dump failed: ${e.message})\n${String(e.stack || '').slice(0, 800)}`; }
 
+    // The Gemini-site provider's own trace of the last ten minutes, when there is one: why a
+    // question to it failed is in there, not on this page.
+    let gwTrace = '';
+    try {
+      const r = await Promise.race([chrome.runtime.sendMessage({ type: 'gw-log', limit: 80, sinceMs: 10 * 60000 }), sleep(1500).then(() => null)]);
+      gwTrace = r?.text || '';
+    } catch { /* no worker, or not the extension */ }
+
     const report = [
       '=== alef-solver failure ===',
       `build:       ${BUILD}`,
@@ -3971,6 +4427,7 @@
       extra ? `detail:\n${extra.slice(0, 3000)}` : '',
       '',
       dumped,
+      ...(gwTrace ? ['', '=== Gemini site trace (last 10 minutes) ===', gwTrace] : []),
     ].join('\n');
 
     try { await chrome.storage.local.set({ lastReport: report, lastReportAt: Date.now() }); }
@@ -4119,6 +4576,87 @@
     return out;
   }
 
+  /** The class this lesson belongs to, as the site's header names it ("Chemistry", "Arabic", "Islamic
+   *  Studies"…), so the model can be told what kind of answer the course expects. A question shown in a
+   *  frame looks in the page around it; '' when neither shows one. */
+  function currentSubject() {
+    for (const doc of [document, (() => { try { return window.top.document; } catch { return null; } })()]) {
+      const el = doc && doc.querySelector('.class-selector__button, [class*="class-selector"] [class*="button"]');
+      const t = el ? norm(el.innerText || el.textContent || '') : '';
+      if (t) return t.slice(0, 60);
+    }
+    return '';
+  }
+
+  /* ------------------------------------------------------------ a typed math answer, tidied */
+
+  // A model writes math its own way: LaTeX (\frac{3}{4}, \sqrt{2}, 30^\circ), dollar signs, the variable
+  // again ("x = 5" in a box that already follows "x ="), the unit the page prints after the box, a "½".
+  // Typed as it comes, that lands in the box as backslashes and words. This turns it into what a person
+  // would type: plain math ("3/4", "sqrt(2)", "x^2"), which a math box (MathLive, as ASCII math) and a
+  // plain box both take. An answer with no math in it — a word from a word bank — is left exactly as it is.
+  const VULGAR = { '½': '1/2', '⅓': '1/3', '⅔': '2/3', '¼': '1/4', '¾': '3/4', '⅕': '1/5', '⅖': '2/5', '⅗': '3/5', '⅘': '4/5', '⅙': '1/6', '⅚': '5/6', '⅛': '1/8', '⅜': '3/8', '⅝': '5/8', '⅞': '7/8' };
+  const UNIT = /^\s*(°|%|(?:sq\.?\s*)?(?:mm|cm|km|m|in|ft|yd|mi|g|kg|mg|lb|oz|l|ml|s|sec|min|h|hr|units?|degrees?)(?:\^?[23²³])?)(?![a-z])/i;
+  function cleanMathAnswer(raw, { before = '', after = '', numeric = false, math = false } = {}) {
+    let s = String(raw ?? '').trim();
+    if (!/[\d\\^=√π°½¼¾⅓⅔⅛]|frac|sqrt/.test(s)) return s;           // not math: exactly as given
+    s = s.replace(/^\$+|\$+$/g, '').replace(/^\\[([]|\\[)\]]$/g, '').trim();
+    s = s.replace(/[−–—]/g, '-').replace(/[×·]/g, '*').replace(/÷/g, '/').replace(/π/g, 'pi')
+         .replace(/≤/g, '<=').replace(/≥/g, '>=').replace(/≠/g, '!=');
+    s = s.replace(/(\d)\s*([½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])/g, '$1 $2').replace(/[½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞]/g, c => VULGAR[c]);
+    s = s.replace(/√\s*\(([^()]*)\)/g, 'sqrt($1)').replace(/√\s*([\w.]+)/g, 'sqrt($1)');
+    // LaTeX → typed math. A fraction of two plain numbers or letters needs no brackets ("3/4"); anything
+    // bigger keeps them, so "(x+1)/(2)" cannot be read as "x + 1/2".
+    const wrap = t => (/^[\w.]+$/.test(t.trim()) ? t.trim() : `(${t.trim()})`);
+    for (let i = 0; i < 6; i++) {
+      const before_ = s;
+      s = s.replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, (_, a, b) => `${wrap(a)}/${wrap(b)}`)
+           .replace(/\\[dt]?frac\s*(\d)(\d)/g, '$1/$2')
+           .replace(/\\sqrt\s*\[([^\]]*)\]\s*\{([^{}]*)\}/g, (_, n, x) => `(${x})^(1/${n})`)
+           .replace(/\\sqrt\s*\{([^{}]*)\}/g, 'sqrt($1)')
+           .replace(/\\(?:text|mathrm|mathbf|operatorname)\s*\{([^{}]*)\}/g, '$1');
+      if (s === before_) break;
+    }
+    s = s.replace(/\^\s*\{?\\circ\}?|\\circ|\\degree/g, '°')
+         .replace(/\^\s*\{([^{}]*)\}/g, (_, e) => `^${wrap(e)}`)
+         .replace(/\\left|\\right/g, '').replace(/\\[,;:! ]/g, ' ')
+         .replace(/\\(?:cdot|times)/g, '*').replace(/\\div/g, '/').replace(/\\pi\b/g, 'pi')
+         .replace(/\\leq?\b/g, '<=').replace(/\\geq?\b/g, '>=').replace(/\\neq?\b/g, '!=')
+         .replace(/\\%/g, '%').replace(/\\([a-zA-Z]+)/g, '$1').replace(/[{}]/g, '')
+         .replace(/\s+/g, ' ').trim();
+    // The variable again, where the page already writes it ("x = ▢"), or around a bare number.
+    const lhs = /^[a-zA-Z](?:_?\w)?\s*=\s*/;
+    if (lhs.test(s) && (/=\s*$/.test(before) || /^-?[\d.,]+(?:\s*\/\s*[\d.]+)?\s*\S{0,3}$/.test(s.replace(lhs, '')))) s = s.replace(lhs, '');
+    // The unit the page prints right after the box.
+    const unit = (UNIT.exec(after) || [])[1];
+    if (unit) {
+      const esc = unit.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*');
+      s = s.replace(new RegExp(`\\s*${esc}\\s*$`, 'i'), '');
+      if (unit === '°') s = s.replace(/\s*(?:°|degrees?)\s*$/i, '');
+    }
+    s = s.replace(/(\d)\.$/, '$1').trim();                            // "5." as the end of a sentence
+    // A math box (MathLive) makes a fraction of "(3)/(4)" but leaves "3/4" as it is, so a plain one is bracketed.
+    if (math) {
+      s = s.replace(/(^|[^\w).])([\w.]+)\s*\/\s*([\w.]+)(?![\w(])/g, '$1($2)/($3)')
+           .replace(/\)\s*\/\s*([\w.]+)(?![\w(])/g, ')/($1)')                 // (x+1)/2
+           .replace(/(^|[^\w).])([\w.]+)\s*\/\s*\(/g, '$1($2)/(');             // 2/(x-1)
+    }
+    // A box that takes only numbers: a fraction becomes the number it is.
+    if (numeric) {
+      const m = /^(-?)(?:(\d+)\s+)?(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/.exec(s);
+      if (m && Number(m[4])) s = String(+((m[1] ? -1 : 1) * ((Number(m[2]) || 0) + Number(m[3]) / Number(m[4]))).toFixed(4));
+    }
+    return s;
+  }
+
+  /** The words on either side of blank `i` in the exercise text, for cleanMathAnswer. */
+  function aroundBlank(text, i) {
+    const mark = `[BLANK ${i + 1}]`;
+    const at = String(text || '').indexOf(mark);
+    if (at < 0) return { before: '', after: '' };
+    return { before: text.slice(Math.max(0, at - 30), at), after: text.slice(at + mark.length, at + mark.length + 16) };
+  }
+
   /** Fill in a cloze question's blanks and (optionally) submit. */
   async function commitCloze(words, opts = {}) {
     const autoSubmit = opts.autoSubmit !== false;
@@ -4132,6 +4670,14 @@
       out.error = `answer count mismatch: ${words.length} answers for ${blanks.length} blanks`;
       return out;
     }
+    // Math as a person would type it (see cleanMathAnswer); a word stays as the model gave it.
+    const given = words;
+    words = words.map((w, i) => cleanMathAnswer(w, {
+      ...aroundBlank(p.cloze?.text, i),
+      numeric: !blanks[i].math && /^(number|tel)$/i.test(blanks[i].el?.type || ''),
+      math: !!blanks[i].math,
+    }));
+    if (words.some((w, i) => w !== String(given[i] ?? '').trim())) out.cleaned = given.map((g, i) => (words[i] !== String(g ?? '').trim() ? `${g} → ${words[i]}` : null)).filter(Boolean);
 
     const fillAll = async () => {
       const done = [];
@@ -4194,7 +4740,7 @@
     dump, screenshot, wantsScreenshot, rateWaitMs, selected, findButton,
     findSubmit: (root) => findButton('submit', root),
     findCloze, findWordBank, setInputValue,
-    forgetPassage, lessonKey, isGraded, contentScreen, commitSort, feedbackForm, feedbackSubmit, stop: () => { stopRun = true; },
+    forgetPassage, lessonKey, isGraded, cleanMathAnswer, blankMark, keepMarkedRight, activityLoading, contentScreen, commitSort, feedbackForm, feedbackSubmit, stop: () => { stopRun = true; recoverSave(null); },
   };
 
   // Only wire up extension messaging when we're actually inside an extension.
@@ -4220,6 +4766,7 @@
     if (lastDragDiag && lastDragDiag.result) return lastDragDiag.result;
     if (lastMatchDiag && lastMatchDiag.result) return lastMatchDiag.result;
     if (skipScreen()) return 'a question this cannot read, but the page offers "I\'ll try later", so it will be skipped';
+    if (notAssigned()) return 'a part of the lesson that is not assigned to you yet ("This is not assigned to you yet") — a lesson run goes on to the next part, or with "Go to the next lesson when done" on, to the next lesson';
     if (feedbackForm()) return 'the lesson\'s rating box ("Rate your lesson!"), not a question — a lesson run with "Go to the next lesson when done" switched on presses its Submit';
     const task = findButton('startTask', null);
     if (task && !inPlayerFooter(task) && !CFG.autoNextLesson) return 'a list of tasks, not a lesson — switch on "Go to the next lesson when done" and a lesson run will start the first task it can do';
@@ -4251,7 +4798,7 @@
             const p = scrape();
             // A whole-lesson run may begin on a screen with no question (a slide, the
             // opening screen): it goes past those. A single answer has nothing to answer there.
-            const lessonFromHere = msg.type === 'do-lesson' && !p.kind && !!contentScreen();
+            const lessonFromHere = msg.type === 'do-lesson' && !p.kind && !!(contentScreen() || notAssigned());
             if (p.kind || skipScreen() || lessonFromHere) {
               if (msg.type === 'do-lesson') solveLesson(); else solve();
               respond({ handled: true, score: p.score, kind: p.kind || (lessonFromHere ? 'slide' : 'skippable'), build: BUILD });
@@ -4285,6 +4832,7 @@
       }
       case 'do-stop': {
         stopRun = true;
+        recoverSave(null);                  // and no reload picks it up again
         if (IS_TOP) hud('stopping…');
         respond({ stopping: true });
         return true;

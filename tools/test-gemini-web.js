@@ -28,7 +28,7 @@ const ctx = vm.createContext({
   TextEncoder,
   Blob,
   FormData,
-  URLSearchParams,
+  URLSearchParams, AbortController, TextDecoder, ReadableStream, setTimeout, clearTimeout,
   location: { get pathname() { return pagePath; } },
   chrome: {
     runtime: {
@@ -609,6 +609,57 @@ const streamPart = text => framed([
   check('an empty array is treated as absent', ctx.gwField(['a', []], 1, 'none') === 'none');
   check('a path walks lists and keys alike', ctx.gwPath({ a: [{ b: 'c' }] }, ['a', 0, 'b']) === 'c');
   check('a path that runs out gives the fallback, not an error', ctx.gwPath({ a: 1 }, ['a', 'b', 'c'], 'none') === 'none');
+
+  /* ------------------------------------------------- a reply stream that never closes */
+  // The reported hang: the site sent the answer and then kept the connection open, and the reply was
+  // read with res.text(), which waits for it to close. It is now read as it streams.
+  console.log('\na reply stream that is never closed (the reported hang)');
+  {
+    const flashModel = { id: 'id-flash', name: 'gemini-flash', label: 'Flash', number: 1, capacity: 1, capacityField: 12 };
+    const openStream = (...chunks) => {
+      let cancelled = false;
+      const enc = new TextEncoder();
+      const body = new ReadableStream({
+        start(c) { for (const ch of chunks) c.enqueue(enc.encode(ch)); /* and never c.close() */ },
+        cancel() { cancelled = true; },
+      });
+      return { res: { ok: true, status: 200, body, text: () => new Promise(() => {}) }, wasCancelled: () => cancelled };
+    };
+    // Finished turn (slot 8 = 2), connection left open.
+    let st = openStream(genPart('{"answer":"B","index":1}'));
+    script(st.res);
+    let t0 = Date.now();
+    let out = await Promise.race([ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q?', model: flashModel }), new Promise(r => setTimeout(() => r('HUNG'), 3000))]);
+    check('a finished turn is answered at once, though the connection stays open', out !== 'HUNG' && out.ok && out.text === '{"answer":"B","index":1}', out === 'HUNG' ? 'hung' : j(out));
+    check('and the stream is let go of', st.wasCancelled());
+    check('quickly', Date.now() - t0 < 1500, `${Date.now() - t0} ms`);
+
+    // Not marked finished, but the JSON answer is whole: that is enough.
+    st = openStream(genPart('{"picks":[2]}', { 8: [1] }));
+    script(st.res);
+    out = await Promise.race([ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q?', model: flashModel }), new Promise(r => setTimeout(() => r('HUNG'), 3000))]);
+    check('a whole JSON answer is taken without waiting for the turn to be marked finished', out !== 'HUNG' && out.ok && out.text === '{"picks":[2]}' && out.done === true, out === 'HUNG' ? 'hung' : j(out));
+
+    // Half an answer, then nothing: must not be taken as done (the time limit deals with it).
+    check('half a JSON answer is not taken for a whole one', ctx.gwAnswerComplete('{"picks":[') === false && ctx.gwAnswerComplete('thinking about it') === false);
+    check('a fenced JSON answer is whole', ctx.gwAnswerComplete('```json\n{"index":0}\n```') === true);
+  }
+
+  // The live log: the site sent the conversation ids and `{"37":[0]}`, then nothing — for 90 s, twice.
+  console.log('\na model that starts the reply and never says anything');
+  {
+    const meta = framed([slots(3, { 0: 'wrb.fr', 2: JSON.stringify([null, ['c_1', 'r_1'], { 18: 'r_1', 44: true }]) })]);
+    const enc = new TextEncoder();
+    const body = new ReadableStream({ start(c) { c.enqueue(enc.encode(meta)); } });     // and nothing more, ever
+    script({ ok: true, status: 200, body, text: () => new Promise(() => {}) });
+    const t0 = Date.now();
+    const out = await Promise.race([
+      ctx.gwGenerate({ at: 'T', hl: 'en' }, { prompt: 'Q?', model: { id: 'x', name: 'gemini-flash', label: 'Flash', number: 1, capacity: 1, capacityField: 12 }, noTextMs: 400 }),
+      new Promise(r => setTimeout(() => r('HUNG'), 5000)),
+    ]);
+    check('with another model to ask, it is given up once it has said nothing for the no-text limit', out !== 'HUNG' && out.ok === false && out.status === 504 && /no answer text after/.test(out.detail), out === 'HUNG' ? 'hung' : j(out));
+    check('soon', Date.now() - t0 < 2000, `${Date.now() - t0} ms`);
+  }
 
   console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

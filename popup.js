@@ -1,4 +1,4 @@
-const KEYS = ['autoSubmit', 'openPassage', 'screenshot', 'apiKey', 'provider', 'geminiKey', 'openaiKey', 'deepseekToken', 'geminiWebModel', 'advance', 'cachePassage', 'devMode', 'hotkeys', 'autoNextLesson', 'skipLater'];
+const KEYS = ['autoSubmit', 'openPassage', 'screenshot', 'apiKey', 'provider', 'geminiKey', 'openaiKey', 'deepseekToken', 'geminiWebModel', 'advance', 'cachePassage', 'devMode', 'hotkeys', 'autoNextLesson', 'skipLater', 'autoRecover'];
 
 // Developer mode (set in Options) shows Dump and Copy last report. Reports are saved
 // either way; the switch only decides whether there is a button to copy one.
@@ -33,6 +33,7 @@ async function load() {
   document.getElementById('cachePassage').checked = s.cachePassage !== false;
   document.getElementById('autoNextLesson').checked = s.autoNextLesson === true;     // off until switched on
   document.getElementById('skipLater').checked = s.skipLater !== false;              // on unless switched off
+  document.getElementById('autoRecover').checked = s.autoRecover !== false;          // on unless switched off
   // The warning is about the credential of the service that is chosen: a Gemini key does nothing for OpenRouter.
   const cred = s.provider === 'gemini' ? s.geminiKey
              : s.provider === 'openai' ? s.openaiKey
@@ -47,6 +48,7 @@ async function load() {
   dev = s.devMode === true;
   document.getElementById('dump').hidden = !dev;
   document.getElementById('report').hidden = !dev;
+  document.getElementById('gwlog').hidden = !(dev || s.provider === 'gemini-web');     // shown whenever Gemini is the service
 
   // The Gemini-site service has nothing to paste, so what can go wrong is simply that no
   // signed-in tab is open — which is worth saying before a question is asked, not after.
@@ -80,6 +82,7 @@ for (const [id, key, prop] of [
   ['cachePassage', 'cachePassage', 'checked'],
   ['autoNextLesson', 'autoNextLesson', 'checked'],
   ['skipLater', 'skipLater', 'checked'],
+  ['autoRecover', 'autoRecover', 'checked'],
 ]) {
   document.getElementById(id).addEventListener('change', e => {
     chrome.storage.local.set({ [key]: e.target[prop] });
@@ -167,6 +170,20 @@ document.getElementById('report').addEventListener('click', async () => {
       (age > 10 * 60e3 ? ' — that is an OLD one: click "Dump page structure" first for a fresh one' : ' — paste it into a bug report'));
   } catch (e) {
     say(`copy failed: ${e.message}`);
+  }
+});
+
+// The Gemini-site provider's step-by-step trace: which tab, the session, the model, each request and
+// how it ended. What to send when Gemini answers nothing.
+document.getElementById('gwlog').addEventListener('click', async () => {
+  try {
+    const r = await chrome.runtime.sendMessage({ type: 'gw-log', limit: 300 });
+    const text = r?.text || '';
+    if (!text) { say('The Gemini log is empty — ask a question with Gemini as the service first.'); return; }
+    await navigator.clipboard.writeText(`=== alef-solver Gemini log · build ${BUILD} ===\n${text}`);
+    say(`copied the Gemini log (${text.split('\n').length} lines) — paste it into a bug report`);
+  } catch (e) {
+    say(`copy failed: ${e.message || e}`);
   }
 });
 

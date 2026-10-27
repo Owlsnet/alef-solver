@@ -94,6 +94,18 @@ const MENUS = [
   // Await the expression IN the page before stringifying; JSON.stringify(promise) is "{}".
   const J = async expr => JSON.parse(await s.eval(`(async () => JSON.stringify(await (${expr})))()`));
 
+  // The live Arabic page: two bullet points in the sentence block were taken for the choices of a
+  // multiple-choice question, and the drop-down was never opened.
+  console.log('\n=== a bulleted list inside the drop-down sentence ===');
+  await load('?mode=aria&bullets=1');
+  {
+    const rep = await J(`window.__alefSolver.report()`);
+    check('the bullet points are not taken for choices: it is a drop-down question', rep.kind === 'dropdown', `kind=${rep.kind}`);
+    await load('?mode=aria&bullets=1');
+    const res = await J(`window.__alefSolver.solveOne(true)`);
+    check('and the drop-downs get filled', res.ok === true && await s.eval(`window.__sel.every(v => v != null)`) === true, res.reason || '');
+  }
+
   for (const mode of ['aria', 'plain', 'native']) {
     console.log(`\n=== layout: ${mode} ===`);
     await load(`?mode=${mode}`);

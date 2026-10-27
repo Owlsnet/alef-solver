@@ -396,7 +396,7 @@ function gwSlug(value) {
 /** One question. Returns the answer text, what the model was thinking if it says, and why it
  *  stopped — in the same shape every other provider in this extension returns. */
 async function gwGenerate(session, opts) {
-  const { prompt, model, thinking, fileData, chat } = opts;
+  const { prompt, model, thinking, fileData, chat, noTextMs = 0 } = opts;
   const modelNumber = model?.number || 1;
   const level = gwThinkingLevel(thinking);
 
@@ -439,7 +439,27 @@ async function gwGenerate(session, opts) {
   if (session.bl) params.set('bl', session.bl);
   if (session.sid) params.set('f.sid', session.sid);
 
-  const res = await fetch(gwUrl(`${GW_GENERATE_PATH}?${params}`, session.account), {
+  // Never wait for ever: a whole answer gets GW_TOTAL_MS, and a stream that goes quiet GW_IDLE_MS —
+  // but only once the answer has started. The site sends nothing at all while the model thinks, so
+  // silence before the first words is thinking, not a dead stream (a live run lost a working
+  // 3.8 Flash answer to that), and only the overall limit applies to it.
+  const ctl = new AbortController();
+  let why = '';
+  let readerRef = null;
+  // Cancelling the request ends its stream in a browser; the reader is cut as well, so a stream that
+  // does not honour the cancel cannot hold the answer up either.
+  const stop = reason => { why = reason; ctl.abort(); try { readerRef?.cancel().catch(() => {}); } catch { /* gone */ } };
+  const total = setTimeout(() => stop(`no answer within ${GW_TOTAL_MS / 1000} s`), GW_TOTAL_MS);
+  let idle = null;
+  const bump = () => { clearTimeout(idle); idle = setTimeout(() => stop(`the reply stopped coming for ${GW_IDLE_MS / 1000} s`), GW_IDLE_MS); };
+  // With another model to ask, one that has not begun its answer by noTextMs is given up on.
+  const noText = noTextMs ? setTimeout(() => stop(`no answer text after ${noTextMs / 1000} s`), noTextMs) : null;
+  const settle = () => { clearTimeout(total); clearTimeout(idle); clearTimeout(noText); };
+
+  let res;
+  try {
+    res = await fetch(gwUrl(`${GW_GENERATE_PATH}?${params}`, session.account), {
+    signal: ctl.signal,
     method: 'POST',
     credentials: 'include',
     headers: {
@@ -451,12 +471,89 @@ async function gwGenerate(session, opts) {
     body: `at=${encodeURIComponent(session.at || '')}&f.req=${encodeURIComponent(
       JSON.stringify([null, JSON.stringify(inner)]))}`,
   });
+  } catch (e) {
+    settle();
+    return { ok: false, status: 504, detail: why ? `Gemini: ${why}` : String(e?.message || e) };
+  }
   if (!res.ok) {
+    settle();
     const detail = await res.text().catch(() => '');
-    return { ok: false, status: res.status, detail: String(detail).slice(0, 300) };
+    return { ok: false, status: res.status, detail: String(detail).slice(0, 300), diag: { http: res.status, ended: 'http-error' } };
   }
 
-  const parts = gwFrames(await res.text());
+  // The reply streams in. It is read as it comes, and left the moment it is complete — the turn
+  // marked finished, or the answer's JSON closed — rather than when the site gets round to closing
+  // the connection, which can be a long time later, or (the reported hang) never.
+  let raw = '', got = gwReadParts([]);
+  const tSent = Date.now();
+  const diag = { http: res.status, chunks: 0, firstByteMs: null, ended: 'closed' };
+  const reader = res.body?.getReader?.();
+  readerRef = reader || null;
+  try {
+    if (!reader) raw = await res.text();
+    else {
+      const dec = new TextDecoder();
+      for (;;) {
+        const { value, done: ended } = await reader.read();
+        if (ended) break;
+        if (diag.firstByteMs == null) diag.firstByteMs = Date.now() - tSent;
+        diag.chunks++;
+        raw += dec.decode(value, { stream: true });
+        got = gwReadParts(gwFrames(raw));
+        if (got.text) {
+          if (diag.firstTextMs == null) diag.firstTextMs = Date.now() - tSent;     // how long it thought
+          clearTimeout(noText);
+          bump();
+        }
+        if (got.code || got.done || gwAnswerComplete(got.text)) {
+          diag.ended = got.code ? 'refusal' : got.done ? 'turn-finished' : 'answer-complete';
+          reader.cancel().catch(() => {});
+          break;
+        }
+      }
+    }
+  } catch (e) {
+    // Timed out (or the connection broke) part-way: what came is kept, and judged below.
+    diag.ended = why ? `timeout (${why})` : `broken: ${String(e?.message || e).slice(0, 120)}`;
+    if (!raw) { settle(); return { ok: false, status: 504, detail: why ? `Gemini: ${why}` : String(e?.message || e), diag: gwDiag(diag, raw, tSent) }; }
+  }
+  settle();
+  if (why && diag.ended === 'closed') diag.ended = `timeout (${why})`;      // cut by a limit, not closed by the site
+  got = gwReadParts(gwFrames(raw));
+  if (!got.text && !got.code && why) return { ok: false, status: 504, detail: `Gemini: ${why}`, diag: gwDiag(diag, raw, tSent) };
+  let { text, thoughts, cid, rid, rcid, done, code } = got;
+  if (!done && gwAnswerComplete(text)) done = true;      // left early, with the whole answer
+
+  // Where the reasoning is not a field of its own it is woven into the text between two
+  // control characters, and has to be cut out of the answer rather than shown as part of it.
+  const split = gwSplitThinking(text);
+  if (split.thoughts) { thoughts = split.thoughts; text = split.text; }
+
+  return { ok: true, text, thoughts, done, code, cid, rid, rcid, diag: gwDiag(diag, raw, tSent, text) };
+}
+
+/** What the tab saw of one reply, for the trace: sizes and timings, and — only when no answer could
+ *  be read out of it — the start of the raw reply, which is where a changed format shows. */
+function gwDiag(d, raw, tSent, text = '') {
+  return { ...d, totalMs: Date.now() - tSent, bytes: raw.length, frames: gwFrames(raw).length, ...(text ? {} : { rawHead: raw.slice(0, 400) }) };
+}
+
+/** How long one answer may take, and how long the stream may go quiet, before it is given up. */
+const GW_TOTAL_MS = 90000;
+const GW_IDLE_MS = 25000;
+
+/** Is this (cumulative) reply already a whole answer? The solver asks for one JSON object and
+ *  nothing else, so once the text after any reasoning is a JSON object that parses, it is done. */
+function gwAnswerComplete(text) {
+  if (!text) return false;
+  const t = gwSplitThinking(text).text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  if (!t.startsWith('{') || !t.endsWith('}')) return false;
+  try { return typeof JSON.parse(t) === 'object'; } catch { return false; }
+}
+
+/** Everything the frames so far say: the answer, the reasoning, the conversation's ids, whether
+ *  the turn is finished, and a refusal code if there is one. */
+function gwReadParts(parts) {
   let text = '', thoughts = '', cid = '', rid = '', rcid = '', done = false, code = 0;
 
   for (const part of parts) {
@@ -496,13 +593,7 @@ async function gwGenerate(session, opts) {
       if (gwPath(cand, [8, 0]) === 2) done = true;   // 2 is "this turn is finished"
     }
   }
-
-  // Where the reasoning is not a field of its own it is woven into the text between two
-  // control characters, and has to be cut out of the answer rather than shown as part of it.
-  const split = gwSplitThinking(text);
-  if (split.thoughts) { thoughts = split.thoughts; text = split.text; }
-
-  return { ok: true, text, thoughts, done, code, cid, rid, rcid };
+  return { text, thoughts, cid, rid, rcid, done, code };
 }
 
 /** The failure code inside a `BardErrorInfo` block, or 0 when the frame holds none. The block
@@ -591,7 +682,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
           const words = out.code === -1
             ? 'the site refused the question without saying why — the login may have expired'
             : GW_ERRORS[out.code] || `the site reported error ${out.code}`;
-          return { ok: true, text: '', failure: words, code: out.code };
+          return { ok: true, text: '', failure: words, code: out.code, diag: out.diag };
         }
         return out;
       }

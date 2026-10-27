@@ -99,6 +99,19 @@ check('a bare [DONE] ends the message and is not appended', r.text === 'answer' 
 r = ctx.parseDeepseekStream('data: {"p":"response/fragments/-1/content","o":"APPEND","v":"answer"}\ndata: {"v":"[DONE]"}');
 check('a framed [DONE] is not appended either', r.text === 'answer' && r.finish === 'stop', JSON.stringify(r));
 
+// Expert mode: the reasoning is a THINK fragment on the same content path as the answer, and the
+// answer arrives as a second fragment appended later (the failure from the real run, build 0.6.37).
+r = ctx.parseDeepseekStream([
+  { v: { response: { message_id: 9, fragments: [{ type: 'THINK', content: 'We' }] } } },
+  { p: 'response/fragments/-1/content', o: 'APPEND', v: ' need answer JSON.' },
+  { v: ' Need choose index 2.' },
+  { p: 'response/fragments', o: 'APPEND', v: [{ type: 'RESPONSE', content: '{"picks"' }] },
+  { p: 'response/fragments/-1/content', v: ': [2]' },
+  { v: '}' },
+  { p: 'response', o: 'BATCH', v: [{ p: 'status', v: 'FINISHED' }] },
+].map(f => `data: ${JSON.stringify(f)}`).join('\n') + '\ndata: [DONE]');
+check('THINK fragments are left out, the RESPONSE fragment is the answer', r.text === '{"picks": [2]}', JSON.stringify(r.text));
+
 r = ctx.parseDeepseekStream('data: {broken json}\n\ndata: [DONE]');
 check('a malformed frame is skipped, not fatal', r.text === '' && r.finish === 'stop', JSON.stringify(r));
 

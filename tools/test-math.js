@@ -136,6 +136,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ['sqrt(x)', /\\sqrt/, 'a square root'],
     ['(1)/(2)', /\\frac/, 'a fraction'],
     ['-4', /^-4$/, 'a negative number'],
+    // The model's own way of writing it, tidied first (cleanMathAnswer): never backslashes or dollar
+    // signs in the box as text.
+    ['$\\frac{3}{4}$', /^\\frac\{?3\}?\{?4\}?$/, 'a fraction the model wrote in LaTeX, with dollar signs'],
+    ['\\sqrt{2}', /^\\sqrt\{?2\}?$/, 'a root the model wrote in LaTeX'],
+    ['x^{2}+1', /^x\^\{?2\}?\+1$/, 'a power with LaTeX braces'],
+    ['½', /^\\frac\{?1\}?\{?2\}?$/, 'a fraction written as one character'],
   ]) {
     await load('', [typed]);
     const o = await J(`window.__alefSolver.commitCloze([${JSON.stringify(typed)}], { autoSubmit: false })`);
